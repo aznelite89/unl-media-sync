@@ -5,9 +5,15 @@
  */
 import assert from 'node:assert/strict';
 
-import { MEDIA_ORIGIN, MEDIA_STATUS, STATE_VERSION } from '../src/constants/index.js';
+import { MEDIA_ORIGIN, MEDIA_STATUS, STATE_VERSION, SYNC_OUTCOME } from '../src/constants/index.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
-import { buildState, orderAlreadyCorrect, planMediaChanges, parseState } from '../src/utils/sync.js';
+import {
+  buildState,
+  orderAlreadyCorrect,
+  planMediaChanges,
+  parseState,
+  syncUnleashedProduct,
+} from '../src/utils/sync.js';
 import { signQueryString, verifyWebhook } from '../src/utils/unleashed.js';
 
 const tests = [];
@@ -369,6 +375,54 @@ test('no cap supplied means no cap applied', () => {
   assert.equal(plan.skippedForCap.length, 0);
 });
 
+test('a product blocked entirely by the cap reports as CAPPED, never as unchanged', async () => {
+  // Reports drop `unchanged` rows as noise. If a fully-capped product reported
+  // `unchanged`, every skipped image would vanish from the run summary and a
+  // truncated backfill would look clean — which is exactly what happened on the
+  // first live backfill before this was fixed.
+  const shopify = {
+    findProductsBySku: async () => ({
+      products: [{ id: 'gid://shopify/Product/1', title: 'Full Product' }],
+      variantIds: [],
+    }),
+    getProduct: async () => ({
+      id: 'gid://shopify/Product/1',
+      title: 'Full Product',
+      media: CAP_LIVE(5),
+      stateMetafield: null,
+    }),
+    appendImage: async () => assert.fail('must not upload when the page is full'),
+    detachMedia: async () => assert.fail('the cap must never cause a removal'),
+    reorderMedia: async () => assert.fail('must not reorder a capped product'),
+    saveState: async () => [],
+  };
+
+  const result = await syncUnleashedProduct({
+    unleashedProduct: {
+      ProductCode: 'CAPPED-1',
+      Guid: 'g',
+      Images: [{ Url: 'https://unl/wants-in.png', IsDefault: true }],
+    },
+    shopify,
+    config: {
+      maxSyncedImages: 5,
+      maxMediaPerProduct: 5,
+      deleteRemovedMedia: false,
+      reorderMedia: true,
+      dryRun: false,
+    },
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.outcome, SYNC_OUTCOME.CAPPED);
+  assert.equal(result.skippedForCap.length, 1);
+  assert.equal(result.added.length, 0);
+  assert.ok(
+    result.notes.some((n) => n.includes('page cap reached')),
+    'the skipped image must be explained in the notes',
+  );
+});
+
 test('an already-correct order is not reordered again', () => {
   assert.equal(orderAlreadyCorrect(['a', 'b', 'c'], ['a', 'b']), true);
   assert.equal(orderAlreadyCorrect(['a', 'b'], ['a', 'b']), true);
@@ -432,7 +486,7 @@ test('webhook verification rejects a tampered body, bad key and stale timestamp'
 let failures = 0;
 for (const [name, fn] of tests) {
   try {
-    fn();
+    await fn();
     console.log(`  ok  ${name}`);
   } catch (error) {
     failures += 1;

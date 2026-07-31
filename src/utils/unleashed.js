@@ -134,17 +134,26 @@ export function createUnleashedClient(config, log = console) {
    * Yields every product modified since `sinceIso`, one page at a time.
    * Page number is a path segment (`/Products/2?pageSize=200`).
    *
-   * @param {{ sinceIso?: string, pageSize?: number, maxPages?: number }} options
+   * `startPage` makes a catalogue pass resumable: a run can cover pages 1–8,
+   * the next 9–16, and so on, without repeating work. Page numbering is stable
+   * for a given `pageSize` and filter.
+   *
+   * @param {{ sinceIso?: string, pageSize?: number, maxPages?: number, startPage?: number }} options
    */
   async function* iterateProducts({
     sinceIso,
     pageSize = UNLEASHED_PAGE_SIZE,
     maxPages = RECONCILE_MAX_PAGES,
+    startPage = UNLEASHED_FIRST_PAGE,
   } = {}) {
-    let pageNumber = UNLEASHED_FIRST_PAGE;
-    let totalPages = 1;
+    let pageNumber = Math.max(UNLEASHED_FIRST_PAGE, startPage);
+    const endPage = pageNumber + maxPages - 1;
+    // Unknown until the first response. Starting at 1 would abort any run whose
+    // startPage is beyond it, silently yielding nothing; the empty-page check
+    // below is what actually terminates the loop.
+    let totalPages = Number.POSITIVE_INFINITY;
 
-    while (pageNumber <= totalPages && pageNumber <= maxPages) {
+    while (pageNumber <= totalPages && pageNumber <= endPage) {
       const page = await get(`/Products/${pageNumber}`, {
         pageSize,
         modifiedSince: sinceIso,
@@ -155,12 +164,22 @@ export function createUnleashedClient(config, log = console) {
       const items = page?.Items ?? [];
       if (items.length === 0) return;
 
+      // Unleashed clamps an out-of-range page number to the LAST page rather
+      // than returning nothing, so a chunk starting past the end would re-sync
+      // page N while reporting itself as the page that was asked for.
+      if (pageNumber > totalPages) {
+        log.warn?.(
+          `Requested page ${pageNumber} but the catalogue has ${totalPages}; nothing to do.`,
+        );
+        return;
+      }
+
       yield { items, pageNumber, totalPages };
 
-      if (totalPages > maxPages && pageNumber === maxPages) {
+      if (totalPages > endPage && pageNumber === endPage) {
         log.warn?.(
-          `Unleashed returned ${totalPages} pages; stopping at the ${maxPages}-page cap. ` +
-            'Narrow the window or raise RECONCILE_MAX_PAGES.',
+          `Unleashed has ${totalPages} pages; this run stops at page ${endPage}. ` +
+            `Continue with --start-page ${endPage + 1}, or raise RECONCILE_MAX_PAGES.`,
         );
       }
       pageNumber += 1;

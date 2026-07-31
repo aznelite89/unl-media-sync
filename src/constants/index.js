@@ -82,6 +82,13 @@ export const SYNC_OUTCOME = {
   AMBIGUOUS: 'ambiguous',
   /** Unleashed holds no images for this product. */
   NO_IMAGES: 'no_images',
+  /**
+   * Nothing was uploaded solely because the Shopify product is at its image
+   * cap. Distinct from `unchanged` on purpose: reports filter `unchanged` out
+   * as noise, which would hide every capped image and make a silently
+   * truncated run look clean.
+   */
+  CAPPED: 'capped',
   /** Would have changed something, but DRY_RUN is on. */
   DRY_RUN: 'dry_run',
   FAILED: 'failed',

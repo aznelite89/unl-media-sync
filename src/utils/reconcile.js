@@ -47,20 +47,32 @@ export async function syncByProductCode({ productCode, unleashed, shopify, confi
  *
  * @param {{ sinceIso?: string, limit?: number, unleashed: object, shopify: object, config: object, log: object }} input
  */
-export async function reconcile({ sinceIso, limit, unleashed, shopify, config, log }) {
+export async function reconcile({
+  sinceIso,
+  limit,
+  startPage,
+  maxPages,
+  unleashed,
+  shopify,
+  config,
+  log,
+}) {
   const results = [];
   let scanned = 0;
+  let lastPage = null;
 
   for await (const { items, pageNumber, totalPages } of unleashed.iterateProducts({
     sinceIso,
-    maxPages: config.maxPages,
+    startPage,
+    maxPages: maxPages ?? config.maxPages,
   })) {
+    lastPage = { pageNumber, totalPages };
     log.info?.(`reconcile: page ${pageNumber}/${totalPages} — ${items.length} product(s)`);
 
     for (const unleashedProduct of items) {
       if (limit && results.length >= limit) {
         log.info?.(`reconcile: stopping at limit of ${limit} product(s)`);
-        return finish({ results, scanned, sinceIso, truncated: true });
+        return finish({ results, scanned, sinceIso, truncated: true, lastPage });
       }
 
       scanned += 1;
@@ -89,15 +101,20 @@ export async function reconcile({ sinceIso, limit, unleashed, shopify, config, l
     }
   }
 
-  return finish({ results, scanned, sinceIso, truncated: false });
+  return finish({ results, scanned, sinceIso, truncated: false, lastPage });
 }
 
-function finish({ results, scanned, sinceIso, truncated }) {
+function finish({ results, scanned, sinceIso, truncated, lastPage }) {
+  const morePages = lastPage && lastPage.pageNumber < lastPage.totalPages;
   return {
     sinceIso: sinceIso ?? null,
     scanned,
     withImages: results.length,
     truncated,
+    lastPage: lastPage?.pageNumber ?? null,
+    totalPages: lastPage?.totalPages ?? null,
+    /** Where to resume; null when the catalogue is exhausted. */
+    nextStartPage: morePages ? lastPage.pageNumber + 1 : null,
     byOutcome: summarise(results),
     /** Only the interesting ones — unchanged products are the bulk and are noise. */
     details: results.filter((result) => result.outcome !== SYNC_OUTCOME.UNCHANGED),

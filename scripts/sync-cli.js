@@ -44,6 +44,8 @@ function parseArgs(argv) {
     else if (arg === '--sku') args.sku = argv[++i];
     else if (arg === '--since') args.since = argv[++i];
     else if (arg === '--limit') args.limit = Number.parseInt(argv[++i], 10);
+    else if (arg === '--start-page') args.startPage = Number.parseInt(argv[++i], 10);
+    else if (arg === '--max-pages') args.maxPages = Number.parseInt(argv[++i], 10);
     else if (arg === '--help' || arg === '-h') args.help = true;
     else {
       console.error(`Unknown argument: ${arg}`);
@@ -62,6 +64,9 @@ if (args.help || (!args.sku && !args.since && !args.all)) {
       '  node scripts/sync-cli.js --sku <PRODUCT_CODE> [--dry-run]',
       '  node scripts/sync-cli.js --since YYYY-MM-DD [--limit N] [--dry-run]',
       '  node scripts/sync-cli.js --all [--limit N] [--dry-run]',
+      '',
+      'Chunked catalogue pass (resumable — the report gives nextStartPage):',
+      '  node scripts/sync-cli.js --all --start-page 1 --max-pages 8',
     ].join('\n'),
   );
   process.exit(args.help ? 0 : 1);
@@ -95,6 +100,15 @@ if (args.sku) {
   console.log(JSON.stringify(result, null, 2));
 } else {
   const sinceIso = args.all ? undefined : (args.since ?? lookbackSince(config.reconcileLookbackMinutes));
-  const report = await reconcile({ sinceIso, limit: args.limit, unleashed, shopify, config, log });
+  const report = await reconcile({
+    sinceIso,
+    limit: args.limit,
+    startPage: args.startPage,
+    maxPages: args.maxPages,
+    unleashed,
+    shopify,
+    config,
+    log,
+  });
   console.log(JSON.stringify(report, null, 2));
 }

@@ -276,7 +276,10 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
 
   const hasWork = plan.toUpload.length > 0 || willDetach.length > 0;
   if (!hasWork && !reorderNeededNow) {
-    result.outcome = SYNC_OUTCOME.UNCHANGED;
+    // A product blocked entirely by the cap must not report as `unchanged`,
+    // or reports that drop `unchanged` rows will hide the skipped images.
+    result.outcome =
+      plan.skippedForCap.length > 0 ? SYNC_OUTCOME.CAPPED : SYNC_OUTCOME.UNCHANGED;
     result.adopted = plan.resolved
       .filter((entry) => entry.origin === MEDIA_ORIGIN.ADOPTED)
       .map((entry) => entry.mediaId);
