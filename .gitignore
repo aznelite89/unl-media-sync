@@ -1,0 +1,11 @@
+node_modules/
+local.settings.json
+.env
+.DS_Store
+bin/
+obj/
+*.log
+.azure/
+
+# Generated reports contain catalogue data (SKUs, product ids) — regenerable, not source
+reports/

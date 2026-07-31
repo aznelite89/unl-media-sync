@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+
+    "UNLEASHED_API_ID": "<Unleashed -> Integration -> Unleashed API Access -> API ID>",
+    "UNLEASHED_API_KEY": "<Unleashed -> Integration -> Unleashed API Access -> API Key>",
+    "UNLEASHED_WEBHOOK_SIGNATURE_KEY": "<signatureKey returned once by POST /webhooks/subscriptions>",
+
+    "SHOPIFY_STORE_DOMAIN": "for-discovery.myshopify.com",
+    "SHOPIFY_ADMIN_TOKEN": "<custom app Admin API access token, shpat_...>",
+
+    "MAX_SYNCED_IMAGES": "5",
+    "MAX_MEDIA_PER_PRODUCT": "5",
+    "DELETE_REMOVED_MEDIA": "false",
+    "REORDER_MEDIA": "true",
+    "DRY_RUN": "false",
+    "RECONCILE_LOOKBACK_MINUTES": "60",
+    "RECONCILE_MAX_PAGES": "25"
+  }
+}

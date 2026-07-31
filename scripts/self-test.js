@@ -1,0 +1,444 @@
+#!/usr/bin/env node
+/**
+ * Exercises the decision logic with no network access, using URL shapes taken
+ * from the live store. Run with: node scripts/self-test.js
+ */
+import assert from 'node:assert/strict';
+
+import { MEDIA_ORIGIN, MEDIA_STATUS, STATE_VERSION } from '../src/constants/index.js';
+import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
+import { buildState, orderAlreadyCorrect, planMediaChanges, parseState } from '../src/utils/sync.js';
+import { signQueryString, verifyWebhook } from '../src/utils/unleashed.js';
+
+const tests = [];
+const test = (name, fn) => tests.push([name, fn]);
+
+// Real pairing observed on for-discovery: Unleashed file, then the Shopify copy.
+const UNLEASHED_URL = 'https://unlappcdn.syd.public.unl.sh/80f09d43-44ad-404a-ad55-02c99f9b7388.png';
+const SHOPIFY_URL =
+  'https://cdn.shopify.com/s/files/1/0431/5342/4537/files/80f09d43-44ad-404a-ad55-02c99f9b7388_8b9a1258-4642-4d45-b3b6-f2af015f7d05.png?v=1769662214';
+
+test('imageKey strips query string and extension', () => {
+  assert.equal(imageKey(SHOPIFY_URL).startsWith('80f09d43'), true);
+  assert.equal(imageKey(SHOPIFY_URL).includes('?'), false);
+  assert.equal(imageKey(SHOPIFY_URL).includes('.png'), false);
+});
+
+test('Shopify copy is recognised as the same image despite the dedup suffix', () => {
+  assert.equal(isSameImage(SHOPIFY_URL, UNLEASHED_URL), true);
+});
+
+test('a different image is not matched', () => {
+  const other = 'https://cdn.shopify.com/s/files/1/x/files/ade6ac5f-8e69-42d4-a4a7-c9cb3548ef83.png?v=1';
+  assert.equal(isSameImage(other, UNLEASHED_URL), false);
+});
+
+test('exact filename match works (no dedup suffix)', () => {
+  assert.equal(
+    isSameImage('https://cdn.shopify.com/s/files/1/x/files/abc123.jpg?v=9', 'https://unl/abc123.jpg'),
+    true,
+  );
+});
+
+test('default image sorts first and the cap is applied', () => {
+  const ordered = orderedUnleashedImages(
+    [
+      { Url: 'https://unl/a.png', IsDefault: false },
+      { Url: 'https://unl/b.png', IsDefault: true },
+      { Url: 'https://unl/c.png', IsDefault: false },
+      { Url: 'https://unl/d.png', IsDefault: false },
+      { Url: 'https://unl/e.png', IsDefault: false },
+      { Url: 'https://unl/f.png', IsDefault: false },
+    ],
+    5,
+  );
+  assert.equal(ordered.length, 5);
+  assert.equal(ordered[0].url, 'https://unl/b.png');
+  assert.equal(ordered[1].url, 'https://unl/a.png');
+  assert.equal(
+    ordered.some((image) => image.url.endsWith('f.png')),
+    false,
+  );
+});
+
+test('blank and duplicate Unleashed URLs are dropped', () => {
+  const ordered = orderedUnleashedImages(
+    [{ Url: '' }, { Url: 'https://unl/a.png' }, { Url: 'https://unl/a.png' }, { Url: null }],
+    5,
+  );
+  assert.equal(ordered.length, 1);
+});
+
+test('first run ADOPTS the image the Unleashed connector already pushed', () => {
+  const plan = planMediaChanges({
+    desired: [
+      { url: UNLEASHED_URL, isDefault: true },
+      { url: 'https://unl/second.png', isDefault: false },
+    ],
+    liveMedia: [
+      { id: 'gid://shopify/MediaImage/1', status: MEDIA_STATUS.READY, image: { url: SHOPIFY_URL } },
+    ],
+    state: parseState(null),
+  });
+
+  assert.equal(plan.resolved.length, 1, 'the existing image should be adopted, not duplicated');
+  assert.equal(plan.resolved[0].origin, MEDIA_ORIGIN.ADOPTED);
+  assert.equal(plan.toUpload.length, 1);
+  assert.equal(plan.toUpload[0].url, 'https://unl/second.png');
+  assert.equal(plan.toDetach.length, 0);
+});
+
+test('media added by hand in Shopify is never detached or claimed', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: UNLEASHED_URL, isDefault: true }],
+    liveMedia: [
+      { id: 'gid://shopify/MediaImage/1', status: MEDIA_STATUS.READY, image: { url: SHOPIFY_URL } },
+      {
+        id: 'gid://shopify/MediaImage/2',
+        status: MEDIA_STATUS.READY,
+        image: { url: 'https://cdn.shopify.com/s/files/1/x/files/lifestyle-shot-by-hand.jpg?v=2' },
+      },
+    ],
+    state: parseState(null),
+  });
+
+  assert.equal(plan.toDetach.length, 0);
+  assert.equal(plan.unmanagedMedia.length, 1);
+  assert.equal(plan.unmanagedMedia[0].id, 'gid://shopify/MediaImage/2');
+});
+
+test('an image dropped in Unleashed is only detachable if this service added it', () => {
+  const state = {
+    version: STATE_VERSION,
+    syncedAt: '2026-07-01T00:00:00.000Z',
+    managed: [
+      { url: UNLEASHED_URL, mediaId: 'gid://shopify/MediaImage/1', origin: MEDIA_ORIGIN.SYNCED },
+      { url: 'https://unl/gone.png', mediaId: 'gid://shopify/MediaImage/9', origin: MEDIA_ORIGIN.SYNCED },
+    ],
+  };
+  const plan = planMediaChanges({
+    desired: [{ url: UNLEASHED_URL, isDefault: true }],
+    liveMedia: [
+      { id: 'gid://shopify/MediaImage/1', status: MEDIA_STATUS.READY, image: { url: SHOPIFY_URL } },
+      { id: 'gid://shopify/MediaImage/9', status: MEDIA_STATUS.READY, image: { url: 'https://cdn/gone.png' } },
+    ],
+    state,
+  });
+
+  assert.equal(plan.toDetach.length, 1);
+  assert.equal(plan.toDetach[0].mediaId, 'gid://shopify/MediaImage/9');
+  assert.equal(plan.toUpload.length, 0);
+});
+
+test('state pointing at media deleted in Shopify is treated as stale, and re-uploads', () => {
+  const state = {
+    version: STATE_VERSION,
+    managed: [{ url: UNLEASHED_URL, mediaId: 'gid://shopify/MediaImage/deleted' }],
+  };
+  const plan = planMediaChanges({ desired: [{ url: UNLEASHED_URL, isDefault: true }], liveMedia: [], state });
+
+  assert.equal(plan.toUpload.length, 1);
+  assert.equal(plan.toDetach.length, 0);
+});
+
+test('a settled product needs no work', () => {
+  const state = {
+    version: STATE_VERSION,
+    managed: [{ url: UNLEASHED_URL, mediaId: 'gid://shopify/MediaImage/1', origin: MEDIA_ORIGIN.SYNCED }],
+  };
+  const plan = planMediaChanges({
+    desired: [{ url: UNLEASHED_URL, isDefault: true }],
+    liveMedia: [{ id: 'gid://shopify/MediaImage/1', status: MEDIA_STATUS.READY, image: { url: SHOPIFY_URL } }],
+    state,
+  });
+
+  assert.equal(plan.toUpload.length, 0);
+  assert.equal(plan.toDetach.length, 0);
+  assert.equal(plan.resolved.length, 1);
+});
+
+test('malformed state metafield degrades to empty rather than throwing', () => {
+  assert.deepEqual(parseState({ value: 'not json' }).managed, []);
+  assert.deepEqual(parseState({ value: '{"managed":"nope"}' }).managed, []);
+  assert.deepEqual(parseState(null).managed, []);
+});
+
+test('FAILED media is surfaced', () => {
+  const state = {
+    version: STATE_VERSION,
+    managed: [{ url: UNLEASHED_URL, mediaId: 'gid://shopify/MediaImage/1' }],
+  };
+  const plan = planMediaChanges({
+    desired: [{ url: UNLEASHED_URL, isDefault: true }],
+    liveMedia: [
+      {
+        id: 'gid://shopify/MediaImage/1',
+        status: MEDIA_STATUS.FAILED,
+        mediaErrors: [{ code: 'INVALID_IMAGE_FILE_SIZE', message: 'too big' }],
+        image: { url: SHOPIFY_URL },
+      },
+    ],
+    state,
+  });
+  assert.equal(plan.failedMedia.length, 1);
+});
+
+// --- many Unleashed products sharing one Shopify product -------------------
+// Real case on this store: 18K101-3, -4, -5, -6, -7, -10 all resolve to
+// gid://shopify/Product/8225786200217, because alloy/size are variant options.
+
+const SIBLING_STATE = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: 'https://unl/img-for-code-A.png',
+      mediaId: 'gid://shopify/MediaImage/A',
+      origin: MEDIA_ORIGIN.SYNCED,
+      productCode: '18K101-3',
+    },
+  ],
+};
+const SIBLING_LIVE = [
+  {
+    id: 'gid://shopify/MediaImage/A',
+    status: MEDIA_STATUS.READY,
+    image: { url: 'https://cdn.shopify.com/s/files/1/x/files/img-for-code-A.png?v=1' },
+  },
+];
+
+test("a sibling product code's image is NEVER detached", () => {
+  const plan = planMediaChanges({
+    desired: [{ url: 'https://unl/img-for-code-B.png', isDefault: true }],
+    liveMedia: SIBLING_LIVE,
+    state: SIBLING_STATE,
+    productCode: '18K101-4',
+  });
+
+  assert.equal(plan.toDetach.length, 0, "must not detach 18K101-3's image while syncing -4");
+  assert.equal(plan.toUpload.length, 1);
+  assert.equal(plan.siblingManaged.length, 1);
+});
+
+test('reorder is suppressed when a sibling product owns media here', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: 'https://unl/img-for-code-B.png', isDefault: true }],
+    liveMedia: SIBLING_LIVE,
+    state: SIBLING_STATE,
+    productCode: '18K101-4',
+  });
+  // siblingManaged non-empty is what syncUnleashedProduct gates reordering on.
+  assert.ok(plan.siblingManaged.length > 0);
+});
+
+test("writing state preserves sibling product codes' entries", () => {
+  const next = buildState({
+    productCode: '18K101-4',
+    entries: [
+      {
+        url: 'https://unl/img-for-code-B.png',
+        mediaId: 'gid://shopify/MediaImage/B',
+        origin: MEDIA_ORIGIN.SYNCED,
+        isDefault: true,
+      },
+    ],
+    previousManaged: SIBLING_STATE.managed,
+    liveMediaIds: new Set(['gid://shopify/MediaImage/A', 'gid://shopify/MediaImage/B']),
+  });
+
+  const codes = next.managed.map((entry) => entry.productCode).sort();
+  assert.deepEqual(codes, ['18K101-3', '18K101-4'], 'both codes must survive the write');
+  assert.equal(next.managed.length, 2);
+});
+
+test('an image already placed by a sibling is reused, not uploaded twice', () => {
+  // Both Unleashed products point at the same image URL.
+  const shared = 'https://unl/img-for-code-A.png';
+  const plan = planMediaChanges({
+    desired: [{ url: shared, isDefault: true }],
+    liveMedia: SIBLING_LIVE,
+    state: SIBLING_STATE,
+    productCode: '18K101-4',
+  });
+
+  assert.equal(plan.toUpload.length, 0, 'should reuse the sibling-placed media');
+  assert.equal(plan.resolved.length, 1);
+  assert.equal(plan.toDetach.length, 0);
+});
+
+test('stale sibling entries are dropped from state when their media is gone', () => {
+  const next = buildState({
+    productCode: '18K101-4',
+    entries: [],
+    previousManaged: SIBLING_STATE.managed,
+    liveMediaIds: new Set(['gid://shopify/MediaImage/B']), // A was deleted in Shopify
+  });
+  assert.equal(next.managed.length, 0);
+});
+
+// --- page cap: "5 per unleashed product, cap each web page at 5 as well" ------
+
+const CAP_LIVE = (n) =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `gid://shopify/MediaImage/live${i}`,
+    status: MEDIA_STATUS.READY,
+    image: { url: `https://cdn.shopify.com/s/files/1/x/files/existing-${i}.png?v=1` },
+  }));
+
+const CAP_DESIRED = [
+  { url: 'https://unl/new-default.png', isDefault: true },
+  { url: 'https://unl/new-second.png', isDefault: false },
+  { url: 'https://unl/new-third.png', isDefault: false },
+];
+
+test('page cap limits total images on the Shopify product', () => {
+  const plan = planMediaChanges({
+    desired: CAP_DESIRED,
+    liveMedia: CAP_LIVE(3),
+    state: parseState(null),
+    productCode: 'X',
+    maxMediaPerProduct: 5,
+  });
+  assert.equal(plan.toUpload.length, 2, '3 already there + 2 new = 5');
+  assert.equal(plan.skippedForCap.length, 1);
+});
+
+test('the default image is the one that survives the cap', () => {
+  const plan = planMediaChanges({
+    desired: CAP_DESIRED,
+    liveMedia: CAP_LIVE(4),
+    state: parseState(null),
+    productCode: 'X',
+    maxMediaPerProduct: 5,
+  });
+  assert.equal(plan.toUpload.length, 1);
+  assert.equal(plan.toUpload[0].url, 'https://unl/new-default.png');
+  assert.equal(plan.skippedForCap.length, 2);
+});
+
+test('a full page accepts nothing, and still removes nothing', () => {
+  const plan = planMediaChanges({
+    desired: CAP_DESIRED,
+    liveMedia: CAP_LIVE(5),
+    state: parseState(null),
+    productCode: 'X',
+    maxMediaPerProduct: 5,
+  });
+  assert.equal(plan.toUpload.length, 0);
+  assert.equal(plan.skippedForCap.length, 3);
+  assert.equal(plan.toDetach.length, 0, 'the cap must never cause a removal');
+});
+
+test('an over-full page (hand-added images) is left alone, not trimmed', () => {
+  const plan = planMediaChanges({
+    desired: CAP_DESIRED,
+    liveMedia: CAP_LIVE(8),
+    state: parseState(null),
+    productCode: 'X',
+    maxMediaPerProduct: 5,
+  });
+  assert.equal(plan.toUpload.length, 0);
+  assert.equal(plan.toDetach.length, 0);
+  assert.equal(plan.unmanagedMedia.length, 8);
+});
+
+test('adopted images occupy cap slots without consuming an upload', () => {
+  // The page already holds this product's Unleashed image under a Shopify name.
+  const plan = planMediaChanges({
+    desired: [{ url: UNLEASHED_URL, isDefault: true }, ...CAP_DESIRED.slice(0, 2)],
+    liveMedia: [
+      { id: 'gid://shopify/MediaImage/1', status: MEDIA_STATUS.READY, image: { url: SHOPIFY_URL } },
+      ...CAP_LIVE(3),
+    ],
+    state: parseState(null),
+    productCode: 'X',
+    maxMediaPerProduct: 5,
+  });
+  assert.equal(plan.resolved.length, 1, 'existing image adopted, not re-uploaded');
+  assert.equal(plan.toUpload.length, 1, '4 on the page leaves room for exactly 1');
+  assert.equal(plan.skippedForCap.length, 1);
+});
+
+test('no cap supplied means no cap applied', () => {
+  const plan = planMediaChanges({
+    desired: CAP_DESIRED,
+    liveMedia: CAP_LIVE(20),
+    state: parseState(null),
+    productCode: 'X',
+  });
+  assert.equal(plan.toUpload.length, 3);
+  assert.equal(plan.skippedForCap.length, 0);
+});
+
+test('an already-correct order is not reordered again', () => {
+  assert.equal(orderAlreadyCorrect(['a', 'b', 'c'], ['a', 'b']), true);
+  assert.equal(orderAlreadyCorrect(['a', 'b'], ['a', 'b']), true);
+  assert.equal(orderAlreadyCorrect(['a', 'b'], []), true);
+  assert.equal(orderAlreadyCorrect(['b', 'a'], ['a', 'b']), false);
+  assert.equal(orderAlreadyCorrect(['a'], ['a', 'b']), false, 'a freshly appended image needs a move');
+});
+
+test('Unleashed request signature is HMAC-SHA256 of the query string, base64', () => {
+  // Regression guard on our own output. The algorithm itself (UTF-8 key, HMAC-SHA256
+  // over the query string with no leading '?', base64) mirrors the C# sample in
+  // Unleashed's auth docs; a live call is the real confirmation.
+  assert.equal(
+    signQueryString('customerCode=ACME', 'secret-key'),
+    'adEw/1gTNmqdfSRLMqUNj7dJyDYodHUeekxdpTcf0dg=',
+  );
+  // No query string signs the empty string.
+  assert.equal(signQueryString('', 'secret-key').length > 0, true);
+});
+
+test('webhook signature verification accepts a correct delivery', () => {
+  const key = 'whsec-test';
+  const body = JSON.stringify({ eventType: 'product.updated', data: { productGuid: 'abc' } });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = signQueryString(`${timestamp}.${body}`, key);
+
+  assert.equal(
+    verifyWebhook({ rawBody: body, signature, timestamp, signatureKey: key }).valid,
+    true,
+  );
+});
+
+test('webhook verification rejects a tampered body, bad key and stale timestamp', () => {
+  const key = 'whsec-test';
+  const body = JSON.stringify({ eventType: 'product.updated' });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = signQueryString(`${timestamp}.${body}`, key);
+
+  assert.equal(
+    verifyWebhook({ rawBody: `${body} `, signature, timestamp, signatureKey: key }).valid,
+    false,
+  );
+  assert.equal(
+    verifyWebhook({ rawBody: body, signature, timestamp, signatureKey: 'wrong' }).valid,
+    false,
+  );
+
+  const stale = String(Math.floor(Date.now() / 1000) - 3600);
+  assert.equal(
+    verifyWebhook({
+      rawBody: body,
+      signature: signQueryString(`${stale}.${body}`, key),
+      timestamp: stale,
+      signatureKey: key,
+    }).valid,
+    false,
+  );
+  assert.equal(verifyWebhook({ rawBody: body, signature: '', timestamp, signatureKey: key }).valid, false);
+});
+
+let failures = 0;
+for (const [name, fn] of tests) {
+  try {
+    fn();
+    console.log(`  ok  ${name}`);
+  } catch (error) {
+    failures += 1;
+    console.error(`FAIL  ${name}\n      ${error.message}`);
+  }
+}
+
+console.log(`\n${tests.length - failures}/${tests.length} passed`);
+process.exit(failures === 0 ? 0 : 1);
