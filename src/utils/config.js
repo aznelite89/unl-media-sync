@@ -1,6 +1,8 @@
 import {
+  DEFAULT_DAILY_LOOKBACK_HOURS,
   DEFAULT_MAX_MEDIA_PER_PRODUCT,
   DEFAULT_MAX_SYNCED_IMAGES,
+  DEFAULT_PENDING_WARN_THRESHOLD,
   DEFAULT_RECONCILE_LOOKBACK_MINUTES,
   RECONCILE_MAX_PAGES,
 } from '../constants/index.js';
@@ -46,6 +48,13 @@ export function loadConfig(options = {}) {
     ),
     /** Raise for a whole-catalogue pass; the catalogue is larger than the default cap. */
     maxPages: readInt(process.env.RECONCILE_MAX_PAGES, RECONCILE_MAX_PAGES),
+    /** Daily verification pass and where its summary is delivered. */
+    dailyLookbackHours: readInt(process.env.DAILY_LOOKBACK_HOURS, DEFAULT_DAILY_LOOKBACK_HOURS),
+    pendingWarnThreshold: readInt(
+      process.env.PENDING_WARN_THRESHOLD,
+      DEFAULT_PENDING_WARN_THRESHOLD,
+    ),
+    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
     /**
      * Off by default. When off, media this service added but Unleashed no longer
      * lists is left in place. Media it never added is never touched either way.

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check every module parses
+        run: |
+          status=0
+          while IFS= read -r file; do
+            node --check "$file" || status=1
+          done < <(find src scripts -name '*.js')
+          exit $status
+
+      - name: Run tests
+        # No credentials needed: the suite is entirely offline by design, so CI
+        # never touches the live store.
+        run: node scripts/self-test.js
+
+      - name: Verify the Functions host can load every function
+        # Catches a broken import or a bad app.timer/app.http registration,
+        # which unit tests never exercise. The SDK warns about test mode
+        # outside the host; that is expected and not a failure.
+        run: |
+          for f in src/functions/*.js; do
+            node -e "import('./$f').then(
+              () => console.log('ok   $f'),
+              (e) => { console.error('FAIL $f:', e.message); process.exit(1); }
+            )"
+          done
+
+      - name: Guard against committed credentials
+        # The repo is public. A leaked Shopify or Unleashed key would be live
+        # the moment it is pushed, so fail loudly rather than rely on review.
+        run: |
+          if git grep -nE 'shpat_[A-Za-z0-9]{10,}|shppa_[A-Za-z0-9]{10,}' -- . ':!*.yml'; then
+            echo "::error::A Shopify access token appears to be committed."
+            exit 1
+          fi
+          if git ls-files --error-unmatch local.settings.json >/dev/null 2>&1; then
+            echo "::error::local.settings.json is tracked; it holds live credentials."
+            exit 1
+          fi
+          echo "no credentials found in tracked files"

@@ -17,6 +17,10 @@
     "REORDER_MEDIA": "true",
     "DRY_RUN": "false",
     "RECONCILE_LOOKBACK_MINUTES": "60",
-    "RECONCILE_MAX_PAGES": "25"
+    "RECONCILE_MAX_PAGES": "25",
+
+    "SLACK_WEBHOOK_URL": "<optional: Slack incoming webhook for the daily report; logs only if unset>",
+    "DAILY_LOOKBACK_HOURS": "24",
+    "PENDING_WARN_THRESHOLD": "5"
   }
 }

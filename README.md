@@ -181,6 +181,44 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `unleashedWebhook` | `POST /api/unleashed/product-webhook` (anonymous, HMAC-verified) | near-real-time sync on `product.created` / `product.updated` |
 | `reconcileMedia` | timer, every 10 min | re-reads the last `RECONCILE_LOOKBACK_MINUTES` — covers dropped deliveries and downtime |
 | `backfillMedia` | `GET|POST /api/unleashed/backfill` (function key) | operator runs: `?sku=`, `?since=YYYY-MM-DD`, `?all=true`, `&limit=`, `&dryRun=true` |
+| `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and reports health to Slack |
+
+### Why the daily report exists
+
+A broken sync looks exactly like a quiet day: no errors, no output, nothing on
+the storefront. Every bug found during the first backfill produced a
+clean-looking result while doing the wrong thing.
+
+So the daily job re-checks the last 24 hours **in dry-run mode**. The webhook and
+the 10-minute timer should already have handled all of it, so anything still
+pending is evidence the live sync is failing or falling behind. `dryRun` is
+forced on in that function regardless of the app setting — a reporting job must
+never become a second writer.
+
+| Signal | Verdict |
+|---|---|
+| any product errored | **alert** |
+| pending > `PENDING_WARN_THRESHOLD` | **warn** — live sync is behind or broken |
+| unmatched SKUs, capped images | reported, never alerts — these are steady-state facts, and a daily alert on them trains everyone to ignore the report |
+
+Set `SLACK_WEBHOOK_URL` to a Slack incoming webhook. Without it the summary still
+goes to Application Insights, so a missing webhook never breaks a deployment.
+
+**Known limit:** this catches a sync that runs and misbehaves. It cannot catch a
+Function App that stops running altogether — no run, no message, and Slack
+cannot alert on silence. An availability alert in Application Insights would
+close that gap.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+1. every module parses (`node --check`)
+2. the 36 offline tests — no credentials, so CI never touches the live store
+3. each Function module imports and registers cleanly, which unit tests don't cover
+4. a credential guard: fails if a `shpat_`-style token or `local.settings.json`
+   is ever committed. The repo is public, so a leaked key would be live the
+   instant it is pushed.
 
 The webhook route is anonymous on purpose: authenticity comes from the HMAC signature over
 `{timestamp}.{body}`, which — unlike a key in the URL — cannot leak via logs or referrers.

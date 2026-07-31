@@ -94,6 +94,25 @@ export const SYNC_OUTCOME = {
   FAILED: 'failed',
 };
 
+/**
+ * Health of a daily verification pass.
+ *
+ * The pass re-checks the last day's Unleashed changes in dry-run mode. The live
+ * sync should already have handled them, so anything still pending is evidence
+ * the sync is failing or falling behind — that is the signal worth alerting on.
+ */
+export const SYNC_HEALTH = {
+  OK: 'ok',
+  WARN: 'warn',
+  ALERT: 'alert',
+};
+
+/** Products still needing a sync before a daily pass is considered unhealthy. */
+export const DEFAULT_PENDING_WARN_THRESHOLD = 5;
+
+/** How far back the daily verification pass looks. */
+export const DEFAULT_DAILY_LOOKBACK_HOURS = 24;
+
 export const HTTP_STATUS = {
   OK: 200,
   ACCEPTED: 202,

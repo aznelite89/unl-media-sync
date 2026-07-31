@@ -5,7 +5,14 @@
  */
 import assert from 'node:assert/strict';
 
-import { MEDIA_ORIGIN, MEDIA_STATUS, STATE_VERSION, SYNC_OUTCOME } from '../src/constants/index.js';
+import {
+  MEDIA_ORIGIN,
+  MEDIA_STATUS,
+  STATE_VERSION,
+  SYNC_HEALTH,
+  SYNC_OUTCOME,
+} from '../src/constants/index.js';
+import { buildDailySummary, summariseProblems } from '../src/utils/report.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
 import {
   buildState,
@@ -429,6 +436,66 @@ test('an already-correct order is not reordered again', () => {
   assert.equal(orderAlreadyCorrect(['a', 'b'], []), true);
   assert.equal(orderAlreadyCorrect(['b', 'a'], ['a', 'b']), false);
   assert.equal(orderAlreadyCorrect(['a'], ['a', 'b']), false, 'a freshly appended image needs a move');
+});
+
+// --- daily report health verdict ---------------------------------------------
+
+const summaryOf = (byOutcome, extra = {}) =>
+  buildDailySummary({
+    report: { scanned: 100, withImages: 60, byOutcome, details: [], ...extra },
+    pendingWarnThreshold: 5,
+    lookbackHours: 24,
+  });
+
+test('a quiet day is healthy', () => {
+  const s = summaryOf({ unchanged: 60 });
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  assert.equal(s.counts.pending, 0);
+});
+
+test('any failure is an alert', () => {
+  const s = summaryOf({ unchanged: 59, failed: 1 });
+  assert.equal(s.health, SYNC_HEALTH.ALERT);
+});
+
+test('pending work beyond the threshold warns — the silent-failure signal', () => {
+  assert.equal(summaryOf({ dry_run: 6 }).health, SYNC_HEALTH.WARN);
+  assert.equal(summaryOf({ dry_run: 5 }).health, SYNC_HEALTH.OK, 'at the threshold is tolerated');
+});
+
+test('failures outrank pending work rather than being masked by it', () => {
+  const s = summaryOf({ dry_run: 99, failed: 2 });
+  assert.equal(s.health, SYNC_HEALTH.ALERT, 'must not be downgraded to warn');
+  assert.equal(s.reasons.length, 2, 'both problems reported');
+});
+
+test('unmatched and capped are reported but never alert', () => {
+  // These are steady-state facts about the data. Alerting daily on them would
+  // train everyone to ignore the report.
+  const s = summaryOf({ unchanged: 40, unmatched: 185, capped: 273 });
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  assert.equal(s.counts.unmatched, 185);
+  assert.equal(s.counts.capped, 273);
+  assert.ok(s.text.includes('185'));
+});
+
+test('a truncated check says so, so counts are not read as complete', () => {
+  const s = summaryOf({ unchanged: 10 }, { truncated: true });
+  assert.ok(s.text.includes('lower bound'));
+});
+
+test('problem products are named, capped in length', () => {
+  const report = {
+    details: Array.from({ length: 12 }, (_, i) => ({
+      productCode: `CODE-${i}`,
+      outcome: SYNC_OUTCOME.DRY_RUN,
+      notes: ['would upload 1'],
+    })),
+  };
+  const text = summariseProblems(report, 8);
+  assert.ok(text.includes('CODE-0'));
+  assert.ok(text.includes('and 4 more'));
+  assert.equal(summariseProblems({ details: [] }), null);
 });
 
 test('Unleashed request signature is HMAC-SHA256 of the query string, base64', () => {

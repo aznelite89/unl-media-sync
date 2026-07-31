@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-31 (evening)
+
+### Added
+- `dailyReport` timer function (22:00 UTC / 08:00 AEST): re-verifies the last 24 hours in dry-run mode and reports health. Anything still pending means the live sync failed or fell behind — otherwise invisible, since a broken sync looks like a quiet day. `dryRun` is forced on so the reporting job can never become a second writer.
+- Health verdict rules: any failure alerts, pending beyond `PENDING_WARN_THRESHOLD` warns, unmatched and capped counts are reported but never alert.
+- Optional Slack delivery via `SLACK_WEBHOOK_URL`; without it the summary still reaches Application Insights, and a delivery failure never breaks the sync.
+- GitHub Actions CI: module parse check, the offline test suite, a Functions-host load check for every trigger, and a guard that fails if a Shopify token or `local.settings.json` is ever committed.
+
 ## 2026-07-31 (later)
 
 ### Added
