@@ -7,6 +7,23 @@ Unleashed's built-in Shopify connector syncs only the *default* image and replac
 media when it runs, which wipes images uploaded directly into Shopify. This service replaces
 that behaviour for images.
 
+## Emergency stop
+
+If anything looks wrong, put the sync into dry-run mode. It keeps running and keeps reporting,
+but stops writing to Shopify. Takes effect within a few seconds — the app restarts on a settings
+change — and needs no redeploy.
+
+```bash
+az functionapp config appsettings set -g searay-func-rg -n searay-unleashed-sync \
+  --settings DRY_RUN=true -o none
+```
+
+Resume with the same command and `DRY_RUN=false`.
+
+This does **not** undo anything already synced. To remove an image the sync added, delete it
+from the product in Shopify admin; the sync will not put it back unless that product's entry is
+also cleared from its `custom.unleashed_media` metafield.
+
 ## Why this is a separate service
 
 Nothing here belongs in the theme repo (`Shopify/searay-theme-live`) — it never renders. It is
