@@ -1,4 +1,13 @@
-import { AUDIT_INLINE_LIMIT, EMAIL_SUBJECT_TAG, SYNC_HEALTH, SYNC_OUTCOME } from '../constants/index.js';
+import {
+  AUDIT_INLINE_LIMIT,
+  DAILY_INLINE_LIMIT,
+  DAILY_REPORTED_OUTCOMES,
+  EMAIL_SUBJECT_TAG,
+  OUTCOME_LABEL,
+  REPORT_NOTE_MAX_CHARS,
+  SYNC_HEALTH,
+  SYNC_OUTCOME,
+} from '../constants/index.js';
 import { csvCell, escapeHtml } from './email.js';
 
 /**
@@ -101,43 +110,110 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
     reasons,
     counts: { scanned, settled, pending, failed, unmatched, ambiguous, capped },
     subject: `[${EMAIL_SUBJECT_TAG[health]}] Image sync — ${headline}`,
-    text: buildText({ title, rows, reasons, problems: health === SYNC_HEALTH.OK ? [] : problems }),
+    text: buildText({ title, rows, reasons, problems, problemHeading: DAILY_PROBLEM_HEADING }),
     html: buildHtml({
       title,
       health,
       rows,
       reasons,
-      problems: health === SYNC_HEALTH.OK ? [] : problems,
+      problems,
+      problemHeading: DAILY_PROBLEM_HEADING,
     }),
   };
 }
 
 /**
- * The worst offenders, so a WARN or ALERT names actual products instead of
- * making someone go digging through logs.
+ * Every product behind the summary counts, worst outcome first.
+ *
+ * @param {object} report
+ * @returns {object[]} raw sync results, not display rows
+ */
+export function orderedProblemDetails(report) {
+  const details = report?.details ?? [];
+  return DAILY_REPORTED_OUTCOMES.flatMap((outcome) =>
+    details.filter((detail) => detail.outcome === outcome),
+  );
+}
+
+/**
+ * Names the products behind the counts, so the report answers "which SKUs?"
+ * without anyone opening Application Insights.
+ *
+ * Listed on a healthy report too. An OK verdict routinely carries a handful of
+ * pending, unmatched and capped products — those are exactly the rows people ask
+ * about, and suppressing them was why the question kept coming back.
  *
  * @param {object} report
  * @param {number} [max]
  */
-export function collectProblems(report, max = 20) {
-  const interesting = (report?.details ?? []).filter((detail) =>
-    [SYNC_OUTCOME.FAILED, SYNC_OUTCOME.DRY_RUN, SYNC_OUTCOME.AMBIGUOUS].includes(detail.outcome),
-  );
+export function collectProblems(report, max = DAILY_INLINE_LIMIT) {
+  const interesting = orderedProblemDetails(report);
 
   const rows = interesting.slice(0, max).map((detail) => ({
-    productCode: detail.productCode ?? '(unknown)',
-    outcome: detail.outcome,
-    note: detail.notes?.[0]?.slice(0, 160) ?? '',
+    productCode: detail.productCode || '(unknown)',
+    outcome: OUTCOME_LABEL[detail.outcome] ?? detail.outcome,
+    note: describeDetail(detail),
   }));
 
   if (interesting.length > max) {
     rows.push({
-      productCode: `…and ${interesting.length - max} more`,
+      productCode: `…and ${interesting.length - max} more in the attached CSV`,
       outcome: '',
       note: '',
     });
   }
   return rows;
+}
+
+/**
+ * What a row says about a product: how many images are at stake, what it is, and
+ * what the sync concluded. All the notes, not just the first — a capped product
+ * carries its "Unleashed holds 7 images" note ahead of the cap note itself.
+ *
+ * @param {object} detail
+ */
+function describeDetail(detail) {
+  const parts = [];
+  if (detail.imageCount) parts.push(`${detail.imageCount} image(s)`);
+  if (detail.description) parts.push(detail.description);
+  if (detail.notes?.length) parts.push(detail.notes.join('; '));
+  return truncate(parts.join(' — '));
+}
+
+/**
+ * Cuts at a word boundary and says so. The email is the summary; the attached
+ * CSV carries the same text untruncated, so nothing is lost by stopping here.
+ *
+ * @param {string} text
+ * @param {number} [max]
+ */
+function truncate(text, max = REPORT_NOTE_MAX_CHARS) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+/**
+ * The same list as a CSV, so a long day is worked through in a spreadsheet
+ * rather than read off a truncated table.
+ *
+ * @param {object} report
+ */
+export function buildDailyCsv(report) {
+  const lines = ['product_code,outcome,images,shopify_product_id,detail'];
+  for (const detail of orderedProblemDetails(report)) {
+    lines.push(
+      [
+        csvCell(detail.productCode),
+        csvCell(OUTCOME_LABEL[detail.outcome] ?? detail.outcome),
+        csvCell(detail.imageCount ?? ''),
+        csvCell(detail.shopifyProductId ?? ''),
+        csvCell([detail.description, ...(detail.notes ?? [])].filter(Boolean).join(' — ')),
+      ].join(','),
+    );
+  }
+  return lines.join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -205,7 +281,7 @@ export function buildAuditSummary({ audit }) {
   const inline = unmatched.slice(0, AUDIT_INLINE_LIMIT).map((row) => ({
     productCode: row.productCode,
     outcome: row.suggestion ? `did you mean ${row.suggestion}?` : 'not in Shopify',
-    note: `${row.imageCount} image(s) — ${row.description}`.slice(0, 160),
+    note: truncate(`${row.imageCount} image(s) — ${row.description}`),
   }));
   if (unmatched.length > inline.length) {
     inline.push({
@@ -259,7 +335,7 @@ export function buildAuditCsv(audit) {
 /* Rendering                                                                   */
 /* -------------------------------------------------------------------------- */
 
-function buildText({ title, rows, reasons, problems }) {
+function buildText({ title, rows, reasons, problems, problemHeading = DEFAULT_PROBLEM_HEADING }) {
   const lines = [title, '='.repeat(title.length), ''];
   for (const [label, value] of rows) lines.push(`  ${label.padEnd(28)} ${value}`);
 
@@ -269,7 +345,7 @@ function buildText({ title, rows, reasons, problems }) {
   }
 
   if (problems.length) {
-    lines.push('', 'Products needing attention', '--------------------------');
+    lines.push('', problemHeading, '-'.repeat(problemHeading.length));
     for (const row of problems) {
       lines.push(`  ${row.productCode}  ${row.outcome}${row.note ? `  — ${row.note}` : ''}`);
     }
@@ -281,11 +357,23 @@ function buildText({ title, rows, reasons, problems }) {
 
 const HEALTH_COLOUR = { ok: '#1a7f37', warn: '#9a6700', alert: '#b42318' };
 
+const DEFAULT_PROBLEM_HEADING = 'Products needing attention';
+
+/** Not "needing attention": a healthy daily report lists capped and unmatched rows too. */
+const DAILY_PROBLEM_HEADING = 'Products behind these counts';
+
 /**
  * Deliberately plain, table-based HTML with inline styles — that is what
  * survives Outlook, which is where these land.
  */
-function buildHtml({ title, health, rows, reasons, problems }) {
+function buildHtml({
+  title,
+  health,
+  rows,
+  reasons,
+  problems,
+  problemHeading = DEFAULT_PROBLEM_HEADING,
+}) {
   const colour = HEALTH_COLOUR[health] ?? HEALTH_COLOUR.ok;
 
   const summaryRows = rows
@@ -303,7 +391,7 @@ function buildHtml({ title, health, rows, reasons, problems }) {
     : '';
 
   const problemTable = problems.length
-    ? `<h3 style="margin:24px 0 8px;font-size:15px;">Products needing attention</h3>
+    ? `<h3 style="margin:24px 0 8px;font-size:15px;">${escapeHtml(problemHeading)}</h3>
        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;width:100%;">
          <tr style="text-align:left;border-bottom:1px solid #ddd;">
            <th style="padding:6px 12px 6px 0;">Product code</th>

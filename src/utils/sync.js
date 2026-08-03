@@ -163,6 +163,10 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
   const result = {
     productCode,
     unleashedGuid: unleashedProduct?.Guid ?? null,
+    // Carried on every result so a report row can say what is at stake and which
+    // product it is, without a second Unleashed lookup at reporting time.
+    imageCount: (unleashedProduct?.Images ?? []).length,
+    description: String(unleashedProduct?.ProductDescription ?? '').trim(),
     outcome: SYNC_OUTCOME.FAILED,
     added: [],
     adopted: [],

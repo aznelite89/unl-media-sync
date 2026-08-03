@@ -2,10 +2,11 @@ import { app } from '@azure/functions';
 
 import { EMAIL_SUBJECT_TAG, SYNC_HEALTH } from '../constants/index.js';
 import { loadConfig } from '../utils/config.js';
+import { toAttachment } from '../utils/email.js';
 import { toLog } from '../utils/logger.js';
 import { sendReport } from '../utils/notify.js';
 import { reconcile } from '../utils/reconcile.js';
-import { buildDailySummary } from '../utils/report.js';
+import { buildDailyCsv, buildDailySummary, orderedProblemDetails } from '../utils/report.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import { createUnleashedClient } from '../utils/unleashed.js';
 
@@ -82,9 +83,17 @@ async function handler(timer, context) {
     activity,
   });
 
-  const delivery = await sendReport({ config, summary, log });
+  // The email names the products inline; the CSV is what survives a long day
+  // without being truncated, and can be sorted and worked through.
+  const problems = orderedProblemDetails(report);
+  const attachments = problems.length
+    ? [toAttachment('image-sync-detail.csv', buildDailyCsv(report))]
+    : [];
+
+  const delivery = await sendReport({ config, summary, attachments, log });
   log.info(
-    `daily report: ${summary.health}, delivered=${delivery.delivered}` +
+    `daily report: ${summary.health}, ${problems.length} product(s) listed, ` +
+      `delivered=${delivery.delivered}` +
       (delivery.reason ? ` (${delivery.reason})` : ''),
   );
 

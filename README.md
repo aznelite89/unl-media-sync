@@ -204,6 +204,18 @@ never become a second writer.
 | no changes in 24h but some within the probe window | OK — a quiet day, stated as such |
 | unmatched SKUs, capped images | reported, never alerts — these are steady-state facts, and a daily alert on them trains everyone to ignore the report |
 
+Every count in that email is backed by a named list. Under the summary table the
+report names each product behind the pending, unmatched, ambiguous, capped and
+failed counts — worst outcome first, with the number of images at stake, the
+Unleashed description, and why the sync reached that conclusion. The first 40
+rows appear in the email body (`DAILY_INLINE_LIMIT`); the complete list rides
+along as `image-sync-detail.csv`.
+
+This happens on a **healthy** report too. An OK verdict routinely carries a few
+pending, unmatched and capped products, and printing only the counts meant the
+answer to "which SKUs?" was in Application Insights, which is not where anyone
+was going to look.
+
 The two-window check on activity is the point. A silent 24 hours is ordinary —
 weekends, holidays, a week nobody edits products — so alerting on it alone would
 fire most weekends and be filtered to trash before a real outage arrived. A

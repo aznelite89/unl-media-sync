@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-04
+
+### Added
+- The daily report now names the products behind every count — pending, unmatched, ambiguous, capped and failed — worst outcome first, with the number of images at stake, the Unleashed description and the reason. Previously only the totals were shown, so answering "which SKUs?" meant opening Application Insights.
+- The full list attaches as `image-sync-detail.csv`, so a long day can be sorted and worked through in a spreadsheet rather than read off a truncated table.
+- Sync results carry `imageCount` and `description`, so a report row can identify a product without a second Unleashed lookup.
+- `DAILY_REPORTED_OUTCOMES`, `OUTCOME_LABEL`, `DAILY_INLINE_LIMIT` and `REPORT_NOTE_MAX_CHARS` constants.
+
+### Changed
+- Named products appear on healthy reports too, not just WARN and ALERT. An OK verdict routinely carries pending, unmatched and capped rows, and those are exactly the ones people ask about.
+- Report rows are labelled in English (`pending`, `unmatched SKU`, `declined by the image cap`) instead of raw outcome values like `dry_run`, and carry every note rather than only the first — a capped product's cap note came second and was being dropped.
+
 ## 2026-08-03
 
 ### Fixed

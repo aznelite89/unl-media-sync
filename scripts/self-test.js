@@ -15,8 +15,10 @@ import {
 import {
   buildAuditCsv,
   buildAuditSummary,
+  buildDailyCsv,
   buildDailySummary,
   collectProblems,
+  orderedProblemDetails,
 } from '../src/utils/report.js';
 import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
@@ -501,7 +503,112 @@ test('problem products are named, capped in length', () => {
   const rows = collectProblems(report, 8);
   assert.equal(rows[0].productCode, 'CODE-0');
   assert.ok(rows.at(-1).productCode.includes('and 4 more'));
+  assert.ok(rows.at(-1).productCode.includes('CSV'), 'says where the rest are');
   assert.deepEqual(collectProblems({ details: [] }), []);
+});
+
+// --- naming the SKUs behind the counts ----------------------------------------
+
+const MIXED_DETAILS = [
+  {
+    productCode: 'CAPPED-1',
+    outcome: SYNC_OUTCOME.CAPPED,
+    imageCount: 7,
+    description: 'Belcher Chain',
+    notes: ['Unleashed holds 7 images; syncing the first 5 (cap 5).', 'page cap reached (5/5)'],
+  },
+  {
+    productCode: 'NOSKU-1',
+    outcome: SYNC_OUTCOME.UNMATCHED,
+    imageCount: 2,
+    description: 'Signet Ring',
+    notes: ['No Shopify variant carries this product code'],
+  },
+  {
+    productCode: 'PENDING-1',
+    outcome: SYNC_OUTCOME.DRY_RUN,
+    imageCount: 3,
+    description: 'Curb Bracelet',
+    notes: ['would upload 1, detach 0, adopt 0, reorder: false'],
+  },
+  { productCode: 'BROKEN-1', outcome: SYNC_OUTCOME.FAILED, notes: ['boom'] },
+];
+
+test('a healthy report still names its pending, unmatched and capped SKUs', () => {
+  // The whole point of the change: an OK verdict with 2 pending and 5 unmatched
+  // used to print the counts and nothing else, so "which SKUs?" went to the logs.
+  const s = summaryOf(
+    { unchanged: 40, dry_run: 1, unmatched: 1, capped: 1 },
+    { details: MIXED_DETAILS.filter((d) => d.outcome !== SYNC_OUTCOME.FAILED) },
+  );
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  for (const code of ['PENDING-1', 'NOSKU-1', 'CAPPED-1']) {
+    assert.ok(s.text.includes(code), `${code} named in the text body`);
+    assert.ok(s.html.includes(code), `${code} named in the HTML body`);
+  }
+});
+
+test('rows are worst first, and labelled in English rather than enum values', () => {
+  const rows = collectProblems({ details: MIXED_DETAILS });
+  assert.deepEqual(
+    rows.map((row) => row.productCode),
+    ['BROKEN-1', 'PENDING-1', 'NOSKU-1', 'CAPPED-1'],
+  );
+  assert.deepEqual(
+    rows.map((row) => row.outcome),
+    ['failed', 'pending', 'unmatched SKU', 'declined by the image cap'],
+  );
+  assert.ok(!rows.some((row) => row.outcome.includes('dry_run')));
+});
+
+test('a row says how many images are at stake and what the product is', () => {
+  const [capped] = collectProblems({ details: [MIXED_DETAILS[0]] });
+  assert.ok(capped.note.includes('7 image(s)'));
+  assert.ok(capped.note.includes('Belcher Chain'));
+  // Every note, not just the first — the cap note is second on a capped product.
+  assert.ok(capped.note.includes('page cap reached'), 'the reason survives');
+});
+
+test('a long note stops at a word boundary, and the CSV keeps the whole thing', () => {
+  const detail = {
+    productCode: 'LONG-1',
+    outcome: SYNC_OUTCOME.UNMATCHED,
+    imageCount: 1,
+    description: 'Pendant '.repeat(60).trim(),
+    notes: ['No Shopify variant carries this product code'],
+  };
+  const [row] = collectProblems({ details: [detail] });
+  assert.ok(row.note.endsWith('…'));
+  assert.ok(!row.note.includes('Penda…'), 'no half-word before the ellipsis');
+  assert.ok(row.note.length <= 201);
+  // The CSV is the complete record; only the email body is a summary.
+  assert.ok(buildDailyCsv({ details: [detail] }).includes(detail.description));
+});
+
+test('the detail CSV carries every listed product, not just the inline ones', () => {
+  const details = Array.from({ length: 60 }, (_, i) => ({
+    productCode: `CODE-${i}`,
+    outcome: SYNC_OUTCOME.UNMATCHED,
+    imageCount: 1,
+    description: 'Ring, 9ct',
+    notes: ['No Shopify variant carries this product code'],
+  }));
+  const csv = buildDailyCsv({ details });
+  assert.equal(csv.split('\n').length, 61, 'header plus every row');
+  assert.ok(csv.includes('CODE-59'), 'beyond the inline limit');
+  assert.equal(orderedProblemDetails({ details }).length, 60);
+  assert.equal(collectProblems({ details }).length, 41, 'inline list stays capped');
+});
+
+test('CSV free text with commas survives quoting, and unchanged rows stay out', () => {
+  const csv = buildDailyCsv({
+    details: [
+      { productCode: 'A', outcome: SYNC_OUTCOME.UNMATCHED, description: 'Ring, 9ct, "wide"' },
+      { productCode: 'B', outcome: SYNC_OUTCOME.UNCHANGED, description: 'noise' },
+    ],
+  });
+  assert.ok(csv.includes('"Ring, 9ct, ""wide"""'));
+  assert.ok(!csv.includes('noise'), 'settled products are not a worklist');
 });
 
 // --- zero activity: quiet day vs dead sync -----------------------------------

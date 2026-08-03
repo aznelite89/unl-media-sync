@@ -95,6 +95,40 @@ export const SYNC_OUTCOME = {
 };
 
 /**
+ * Outcomes the daily report names product by product, worst first.
+ *
+ * `unmatched` and `capped` are in this list even though they never alert: the
+ * counts alone prompted "which SKUs?" every time, and the answer was only ever
+ * in the logs. Ordering is severity, so a truncated inline list still leads with
+ * the things that need doing rather than the steady-state data facts.
+ */
+export const DAILY_REPORTED_OUTCOMES = [
+  SYNC_OUTCOME.FAILED,
+  SYNC_OUTCOME.DRY_RUN,
+  SYNC_OUTCOME.AMBIGUOUS,
+  SYNC_OUTCOME.UNMATCHED,
+  SYNC_OUTCOME.CAPPED,
+];
+
+/** Plain English for the report table — nobody outside this repo reads `dry_run`. */
+export const OUTCOME_LABEL = {
+  [SYNC_OUTCOME.FAILED]: 'failed',
+  [SYNC_OUTCOME.DRY_RUN]: 'pending',
+  [SYNC_OUTCOME.AMBIGUOUS]: 'ambiguous SKU',
+  [SYNC_OUTCOME.UNMATCHED]: 'unmatched SKU',
+  [SYNC_OUTCOME.CAPPED]: 'declined by the image cap',
+  [SYNC_OUTCOME.SYNCED]: 'synced',
+  [SYNC_OUTCOME.UNCHANGED]: 'already correct',
+  [SYNC_OUTCOME.NO_IMAGES]: 'no images',
+};
+
+/** Products named inline in the daily report; the rest ride in the attached CSV. */
+export const DAILY_INLINE_LIMIT = 40;
+
+/** Keeps one verbose note from turning a table row into a paragraph. */
+export const REPORT_NOTE_MAX_CHARS = 200;
+
+/**
  * Health of a daily verification pass.
  *
  * The pass re-checks the last day's Unleashed changes in dry-run mode. The live
