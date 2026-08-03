@@ -113,6 +113,60 @@ export const DEFAULT_PENDING_WARN_THRESHOLD = 5;
 /** How far back the daily verification pass looks. */
 export const DEFAULT_DAILY_LOOKBACK_HOURS = 24;
 
+/**
+ * When a daily pass sees no Unleashed changes at all, it widens the window to
+ * this many days before deciding anything is wrong.
+ *
+ * A quiet 24 hours is ordinary — weekends, public holidays, a week nobody edits
+ * products. Alerting on that alone would fire most weekends and be filtered to
+ * trash within a fortnight. A catalogue this size going a full week without one
+ * modification is not ordinary, so the wider window is what actually separates
+ * "quiet" from "the sync has stopped seeing Unleashed".
+ */
+export const ZERO_ACTIVITY_PROBE_DAYS = 7;
+
+/**
+ * Whole-catalogue audit paging. Unleashed allows up to 1000 per page, which
+ * turns a ~6,500 product pass into single-digit requests instead of 33.
+ */
+export const AUDIT_PAGE_SIZE = 1000;
+export const AUDIT_MAX_PAGES = 100;
+
+/** Shopify's ceiling for a paged connection. */
+export const SHOPIFY_BULK_PAGE_SIZE = 250;
+
+/** ~25k variants before the audit would under-report; the store is far below that. */
+export const SHOPIFY_BULK_MAX_PAGES = 100;
+
+/** Unmatched SKUs listed inline in the weekly email; the rest ride in the CSV. */
+export const AUDIT_INLINE_LIMIT = 40;
+
+/**
+ * Leading characters used to bucket SKUs when hunting for a near-miss match.
+ * Short enough that `18KDSC10` and `18KDSC10W` land together, long enough that
+ * buckets stay small.
+ */
+export const NEAR_MISS_PREFIX = 5;
+
+/** Resend is already the store's transactional sender (searay-email-func). */
+export const RESEND_API_BASE = 'https://api.resend.com';
+
+export const DEFAULT_EMAIL_FROM = 'Searay Image Sync <no-reply@searay.net.au>';
+
+/** Overridable with EMAIL_TO so recipients change without a redeploy. */
+export const DEFAULT_EMAIL_TO = [
+  'info@searay.net.au',
+  'christina.l@searay.net.au',
+  'thongz0819@live.com',
+];
+
+/** Subject prefixes, so the inbox is filterable without opening anything. */
+export const EMAIL_SUBJECT_TAG = {
+  ok: 'OK',
+  warn: 'WARN',
+  alert: 'ALERT',
+};
+
 export const HTTP_STATUS = {
   OK: 200,
   ACCEPTED: 202,

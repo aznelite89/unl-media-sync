@@ -55,6 +55,10 @@ jobs:
             echo "::error::A Shopify access token appears to be committed."
             exit 1
           fi
+          if git grep -nE 're_[A-Za-z0-9_]{20,}' -- . ':!*.yml'; then
+            echo "::error::A Resend API key appears to be committed."
+            exit 1
+          fi
           if git ls-files --error-unmatch local.settings.json >/dev/null 2>&1; then
             echo "::error::local.settings.json is tracked; it holds live credentials."
             exit 1

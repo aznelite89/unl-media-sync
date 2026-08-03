@@ -1,10 +1,13 @@
 import {
   DEFAULT_DAILY_LOOKBACK_HOURS,
+  DEFAULT_EMAIL_FROM,
+  DEFAULT_EMAIL_TO,
   DEFAULT_MAX_MEDIA_PER_PRODUCT,
   DEFAULT_MAX_SYNCED_IMAGES,
   DEFAULT_PENDING_WARN_THRESHOLD,
   DEFAULT_RECONCILE_LOOKBACK_MINUTES,
   RECONCILE_MAX_PAGES,
+  ZERO_ACTIVITY_PROBE_DAYS,
 } from '../constants/index.js';
 
 function readBool(value, fallback) {
@@ -15,6 +18,16 @@ function readBool(value, fallback) {
 function readInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Comma or semicolon separated; blanks dropped so a trailing comma is harmless. */
+function readList(value, fallback) {
+  if (!value) return fallback;
+  const items = String(value)
+    .split(/[,;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length ? items : fallback;
 }
 
 /**
@@ -54,7 +67,17 @@ export function loadConfig(options = {}) {
       process.env.PENDING_WARN_THRESHOLD,
       DEFAULT_PENDING_WARN_THRESHOLD,
     ),
-    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
+    /** Days checked before calling a silent 24 hours a fault rather than a quiet day. */
+    zeroActivityProbeDays: readInt(
+      process.env.ZERO_ACTIVITY_PROBE_DAYS,
+      ZERO_ACTIVITY_PROBE_DAYS,
+    ),
+    email: {
+      /** Shared with searay-email-func; a send-only Resend key. */
+      apiKey: process.env.RESEND_API_KEY,
+      from: process.env.EMAIL_FROM || DEFAULT_EMAIL_FROM,
+      to: readList(process.env.EMAIL_TO, DEFAULT_EMAIL_TO),
+    },
     /**
      * Off by default. When off, media this service added but Unleashed no longer
      * lists is left in place. Media it never added is never touched either way.

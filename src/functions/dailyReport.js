@@ -1,13 +1,18 @@
 import { app } from '@azure/functions';
 
-import { SYNC_HEALTH } from '../constants/index.js';
+import { EMAIL_SUBJECT_TAG, SYNC_HEALTH } from '../constants/index.js';
 import { loadConfig } from '../utils/config.js';
 import { toLog } from '../utils/logger.js';
-import { sendDailySummary } from '../utils/notify.js';
+import { sendReport } from '../utils/notify.js';
 import { reconcile } from '../utils/reconcile.js';
-import { buildDailySummary, summariseProblems } from '../utils/report.js';
+import { buildDailySummary } from '../utils/report.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import { createUnleashedClient } from '../utils/unleashed.js';
+
+/** Unleashed wants a naive ISO timestamp, no milliseconds. */
+function isoDaysAgo(days, nowMs = Date.now()) {
+  return new Date(nowMs - days * 86_400_000).toISOString().replace(/\.\d{3}Z$/, '');
+}
 
 /**
  * Daily verification pass.
@@ -28,10 +33,7 @@ async function handler(timer, context) {
   const unleashed = createUnleashedClient(config, log);
   const shopify = createShopifyClient(config, log);
 
-  const sinceIso = new Date(Date.now() - config.dailyLookbackHours * 3_600_000)
-    .toISOString()
-    .replace(/\.\d{3}Z$/, '');
-
+  const sinceIso = isoDaysAgo(config.dailyLookbackHours / 24);
   log.info(`daily report: verifying changes since ${sinceIso}`);
 
   let report;
@@ -40,30 +42,47 @@ async function handler(timer, context) {
   } catch (error) {
     // The check itself failing is the loudest possible signal.
     log.error(`daily report: verification pass failed — ${error.message}`);
-    await sendDailySummary({
+    await sendReport({
       config,
       summary: {
         health: SYNC_HEALTH.ALERT,
+        subject: `[${EMAIL_SUBJECT_TAG.alert}] Image sync — the daily check could not run`,
         text:
-          ':rotating_light: *Image sync check could not run*\n\n' +
-          `The daily verification pass errored: \`${error.message}\`\n` +
-          'This usually means credentials expired or Unleashed/Shopify is unreachable.',
+          'The daily verification pass errored before it could check anything.\n\n' +
+          `  ${error.message}\n\n` +
+          'This usually means the Unleashed or Shopify credentials expired, or one of\n' +
+          'those services was unreachable. Until it succeeds, nothing is verifying that\n' +
+          'the image sync is working.',
       },
       log,
     });
     return;
   }
 
+  // Nothing changed at all. Widen the window before deciding whether that is a
+  // quiet day or a sync that has stopped seeing Unleashed.
+  let activity = null;
+  if (report.scanned === 0) {
+    const probeDays = config.zeroActivityProbeDays;
+    try {
+      const probeCount = await unleashed.countProductsModifiedSince(isoDaysAgo(probeDays));
+      activity = { probeDays, probeCount };
+      log.info(`daily report: no changes in the window; ${probeCount} in the last ${probeDays}d`);
+    } catch (error) {
+      // The probe is a refinement, not the report. Losing it downgrades the
+      // verdict's precision; it must not lose the report itself.
+      log.warn(`daily report: activity probe failed — ${error.message}`);
+    }
+  }
+
   const summary = buildDailySummary({
     report,
     pendingWarnThreshold: config.pendingWarnThreshold,
     lookbackHours: config.dailyLookbackHours,
+    activity,
   });
 
-  // Name the offending products only when something is actually wrong.
-  const extra = summary.health === SYNC_HEALTH.OK ? null : summariseProblems(report);
-
-  const delivery = await sendDailySummary({ config, summary, extra, log });
+  const delivery = await sendReport({ config, summary, log });
   log.info(
     `daily report: ${summary.health}, delivered=${delivery.delivered}` +
       (delivery.reason ? ` (${delivery.reason})` : ''),

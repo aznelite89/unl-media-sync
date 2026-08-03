@@ -12,7 +12,13 @@ import {
   SYNC_HEALTH,
   SYNC_OUTCOME,
 } from '../src/constants/index.js';
-import { buildDailySummary, summariseProblems } from '../src/utils/report.js';
+import {
+  buildAuditCsv,
+  buildAuditSummary,
+  buildDailySummary,
+  collectProblems,
+} from '../src/utils/report.js';
+import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
 import {
   buildState,
@@ -492,10 +498,174 @@ test('problem products are named, capped in length', () => {
       notes: ['would upload 1'],
     })),
   };
-  const text = summariseProblems(report, 8);
-  assert.ok(text.includes('CODE-0'));
-  assert.ok(text.includes('and 4 more'));
-  assert.equal(summariseProblems({ details: [] }), null);
+  const rows = collectProblems(report, 8);
+  assert.equal(rows[0].productCode, 'CODE-0');
+  assert.ok(rows.at(-1).productCode.includes('and 4 more'));
+  assert.deepEqual(collectProblems({ details: [] }), []);
+});
+
+// --- zero activity: quiet day vs dead sync -----------------------------------
+
+const zeroActivity = (activity) =>
+  buildDailySummary({
+    report: { scanned: 0, withImages: 0, byOutcome: {}, details: [] },
+    pendingWarnThreshold: 5,
+    lookbackHours: 24,
+    activity,
+  });
+
+test('a silent 24h with changes earlier in the week is a quiet day, not an alert', () => {
+  // Weekends and holidays are silent. Alerting on them would fire most weeks and
+  // be filtered to trash long before a real outage arrived.
+  const s = zeroActivity({ probeDays: 7, probeCount: 42 });
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  assert.ok(s.text.includes('quiet day'));
+});
+
+test('a silent week is an alert — the sync has stopped seeing Unleashed', () => {
+  const s = zeroActivity({ probeDays: 7, probeCount: 0 });
+  assert.equal(s.health, SYNC_HEALTH.ALERT);
+  assert.ok(s.subject.includes('no Unleashed activity in 7 days'));
+});
+
+test('a failed activity probe still produces a report', () => {
+  // The probe refines the verdict; losing it must not lose the report.
+  const s = zeroActivity(null);
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  assert.ok(s.text.includes('No Unleashed changes'));
+});
+
+test('real failures still outrank a quiet day', () => {
+  const s = buildDailySummary({
+    report: { scanned: 0, withImages: 0, byOutcome: { failed: 3 }, details: [] },
+    pendingWarnThreshold: 5,
+    lookbackHours: 24,
+    activity: { probeDays: 7, probeCount: 99 },
+  });
+  assert.equal(s.health, SYNC_HEALTH.ALERT);
+});
+
+// --- weekly catalogue audit ---------------------------------------------------
+
+const skuMap = (entries) =>
+  new Map(entries.map((sku) => [sku, { productId: `gid://${sku}`, title: sku, productCount: 1 }]));
+
+test('a product with images and no Shopify SKU is unmatched', () => {
+  const result = diffCatalogue({
+    products: [
+      { ProductCode: '9KABC10', ProductDescription: 'Chain', Images: [{ Url: 'a.jpg' }] },
+      { ProductCode: '9KMATCH', ProductDescription: 'Ring', Images: [{ Url: 'b.jpg' }] },
+    ],
+    skus: skuMap(['9kmatch']),
+  });
+
+  assert.equal(result.matched, 1);
+  assert.equal(result.unmatched.length, 1);
+  assert.equal(result.unmatched[0].productCode, '9KABC10');
+  assert.equal(result.unmatched[0].imageCount, 1);
+});
+
+test('products without images are left out — nothing is stranded', () => {
+  // They would bury the actionable list under stock that was never going to
+  // show a photo.
+  const result = diffCatalogue({
+    products: [{ ProductCode: 'NOPHOTO', Images: [] }],
+    skus: skuMap([]),
+  });
+  assert.equal(result.withImages, 0);
+  assert.equal(result.unmatched.length, 0);
+});
+
+test('near-miss SKUs are suggested in both directions', () => {
+  const index = buildPrefixIndex(['18kdsc10w', '9ktfy05542cm', 'unrelated']);
+  // Shopify has a suffix Unleashed lacks.
+  assert.equal(findNearMiss('18kdsc10', index), '18kdsc10w');
+  assert.equal(findNearMiss('9ktfy055', index), '9ktfy05542cm');
+  // Unleashed has a suffix Shopify lacks.
+  assert.equal(findNearMiss('unrelatedxx', index), 'unrelated');
+  assert.equal(findNearMiss('zzzzzzzz', index), null);
+});
+
+test('likely typos sort above products genuinely absent from Shopify', () => {
+  const result = diffCatalogue({
+    products: [
+      { ProductCode: 'ABSENT99', Images: [{ Url: 'a' }, { Url: 'b' }] },
+      { ProductCode: '18KDSC10', Images: [{ Url: 'c' }] },
+    ],
+    skus: skuMap(['18kdsc10w']),
+  });
+
+  assert.equal(result.unmatched[0].productCode, '18KDSC10', 'the one-character fix comes first');
+  assert.equal(result.unmatched[0].suggestion, '18kdsc10w');
+  assert.equal(result.unmatched[1].suggestion, '');
+});
+
+test('a SKU on two Shopify products is reported as a duplicate', () => {
+  const skus = new Map([['dupe1', { productId: 'gid://1', title: 'A', productCount: 2 }]]);
+  const result = diffCatalogue({
+    products: [{ ProductCode: 'DUPE1', Images: [{ Url: 'a' }] }],
+    skus,
+  });
+  assert.equal(result.duplicates.length, 1);
+  assert.equal(result.duplicates[0].productCount, 2);
+});
+
+test('the audit email carries the count in the subject and a CSV of the backlog', () => {
+  const audit = {
+    scanned: 6565,
+    withImages: 2700,
+    matched: 2515,
+    skuCount: 5000,
+    unmatched: [
+      { productCode: '18KDSC10', description: 'Chain, 50cm', imageCount: 2, suggestion: '18kdsc10w' },
+      { productCode: 'ABSENT99', description: 'Ring "special", 9ct', imageCount: 1, suggestion: '' },
+    ],
+    duplicates: [],
+  };
+  const summary = buildAuditSummary({ audit });
+
+  assert.equal(summary.health, SYNC_HEALTH.WARN, 'a worklist warns, it is not an incident');
+  assert.ok(summary.subject.includes('2 product(s)'), 'the count is visible without opening it');
+
+  const csv = buildAuditCsv(audit);
+  const rows = csv.split('\n');
+  assert.equal(rows[0], 'product_code,images,likely_shopify_sku,description');
+  assert.ok(rows[1].includes('18kdsc10w'));
+  // A comma and a quote in a description must not break the columns.
+  assert.ok(rows[2].includes('"Ring ""special"", 9ct"'));
+});
+
+test('a clean audit is OK and says there is nothing to action', () => {
+  const summary = buildAuditSummary({
+    audit: { scanned: 10, withImages: 5, matched: 5, skuCount: 5, unmatched: [], duplicates: [] },
+  });
+  assert.equal(summary.health, SYNC_HEALTH.OK);
+  assert.ok(summary.text.includes('Nothing to action'));
+});
+
+test('report bodies carry no Slack markup now that delivery is email', () => {
+  const s = zeroActivity({ probeDays: 7, probeCount: 5 });
+  assert.ok(!s.text.includes(':white_check_mark:'));
+  assert.ok(!/\*[A-Za-z]/.test(s.text), 'no leftover *bold* markers');
+  assert.ok(s.html.includes('<table'), 'HTML body is table-based for Outlook');
+});
+
+test('free text from Unleashed is escaped before it reaches the HTML body', () => {
+  const summary = buildAuditSummary({
+    audit: {
+      scanned: 1,
+      withImages: 1,
+      matched: 0,
+      skuCount: 0,
+      duplicates: [],
+      unmatched: [
+        { productCode: '<img src=x onerror=alert(1)>', description: 'a & b', imageCount: 1, suggestion: '' },
+      ],
+    },
+  });
+  assert.ok(!summary.html.includes('<img src=x'));
+  assert.ok(summary.html.includes('&lt;img'));
+  assert.ok(summary.html.includes('a &amp; b'));
 });
 
 test('Unleashed request signature is HMAC-SHA256 of the query string, base64', () => {

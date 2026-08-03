@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-08-03
+
+### Added
+- `weeklyAudit` timer (Sun 22:30 UTC / Mon 08:30 AEST): whole-catalogue audit of Unleashed products that hold images but have no matching Shopify SKU — photographed stock no shopper can ever see. The daily report cannot find these because it only looks at the last 24 hours. First run: 195 products, 18 of them likely SKU typos with a suggested match, 2 SKUs on more than one Shopify product.
+- The full unmatched list attaches as `unmatched-skus.csv`, and `scripts/sync-cli.js --audit [--csv <path>]` runs the same audit on demand.
+- Zero-activity alert: a day with no Unleashed changes is re-checked against `ZERO_ACTIVITY_PROBE_DAYS` (7). Silent for a day is a quiet day; silent for a week means the sync has stopped seeing Unleashed.
+- `shopify.listAllVariantSkus()` and `unleashed.countProductsModifiedSince()`.
+
+### Changed
+- Reports are delivered by email through Resend — the sender `searay-email-func` already uses — instead of Slack. Recipients come from `EMAIL_TO` and change without a redeploy. Report bodies are now plain text plus table-based HTML that survives Outlook, with all Unleashed free text escaped.
+
+### Removed
+- `SLACK_WEBHOOK_URL` and the Slack delivery path.
+
 ## 2026-07-31 (evening)
 
 ### Added

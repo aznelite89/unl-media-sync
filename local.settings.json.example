@@ -19,8 +19,11 @@
     "RECONCILE_LOOKBACK_MINUTES": "60",
     "RECONCILE_MAX_PAGES": "25",
 
-    "SLACK_WEBHOOK_URL": "<optional: Slack incoming webhook for the daily report; logs only if unset>",
+    "RESEND_API_KEY": "<send-only Resend key; the same one searay-email-func uses>",
+    "EMAIL_FROM": "Searay Image Sync <no-reply@searay.net.au>",
+    "EMAIL_TO": "info@searay.net.au,christina.l@searay.net.au,thongz0819@live.com",
     "DAILY_LOOKBACK_HOURS": "24",
-    "PENDING_WARN_THRESHOLD": "5"
+    "PENDING_WARN_THRESHOLD": "5",
+    "ZERO_ACTIVITY_PROBE_DAYS": "7"
   }
 }

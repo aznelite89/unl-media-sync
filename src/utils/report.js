@@ -1,7 +1,8 @@
-import { SYNC_HEALTH, SYNC_OUTCOME } from '../constants/index.js';
+import { AUDIT_INLINE_LIMIT, EMAIL_SUBJECT_TAG, SYNC_HEALTH, SYNC_OUTCOME } from '../constants/index.js';
+import { csvCell, escapeHtml } from './email.js';
 
 /**
- * Turns a dry-run reconcile report into a health verdict and a human summary.
+ * Turns a dry-run reconcile report into a health verdict and an email.
  *
  * The daily pass re-checks recent Unleashed changes WITHOUT writing. The live
  * webhook and timer should already have handled them, so:
@@ -9,15 +10,24 @@ import { SYNC_HEALTH, SYNC_OUTCOME } from '../constants/index.js';
  *   pending  — products the live sync should have done and did not. This is the
  *              silent-failure signal the whole report exists to catch.
  *   failed   — errors during the check itself; always an alert.
+ *   no activity — nothing changed in Unleashed at all. Ordinary on a quiet day,
+ *              so it only alerts once a wider window is also empty (see
+ *              `activity` below).
  *   unmatched/capped — data and policy facts, reported but never alerts, or the
  *              alert would fire every day and be ignored within a week.
  *
  * Pure and synchronous so the alert decision is unit-testable.
  *
- * @param {{ report: object, pendingWarnThreshold: number, lookbackHours: number }} input
+ * @param {{
+ *   report: object,
+ *   pendingWarnThreshold: number,
+ *   lookbackHours: number,
+ *   activity?: { probeDays: number, probeCount: number } | null,
+ * }} input
  */
-export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours }) {
+export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours, activity = null }) {
   const byOutcome = report?.byOutcome ?? {};
+  const scanned = report?.scanned ?? 0;
   const pending = byOutcome[SYNC_OUTCOME.DRY_RUN] ?? 0;
   const failed = byOutcome[SYNC_OUTCOME.FAILED] ?? 0;
   const unmatched = byOutcome[SYNC_OUTCOME.UNMATCHED] ?? 0;
@@ -26,52 +36,79 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours 
   const settled = byOutcome[SYNC_OUTCOME.UNCHANGED] ?? 0;
 
   let health = SYNC_HEALTH.OK;
+  let headline = 'nothing outstanding';
   const reasons = [];
 
   if (failed > 0) {
     health = SYNC_HEALTH.ALERT;
-    reasons.push(`${failed} product(s) errored during the check`);
+    headline = `${failed} product(s) errored`;
+    reasons.push(`${failed} product(s) errored during the check.`);
   }
+
   if (pending > pendingWarnThreshold) {
     // Escalate rather than downgrade an existing alert.
     health = failed > 0 ? SYNC_HEALTH.ALERT : SYNC_HEALTH.WARN;
+    if (failed === 0) headline = `${pending} product(s) still pending`;
     reasons.push(
-      `${pending} product(s) still need syncing — the live sync may be failing or behind`,
+      `${pending} product(s) still need syncing — the live sync may be failing or behind.`,
     );
   } else if (pending > 0) {
-    reasons.push(`${pending} product(s) pending, within the tolerance of ${pendingWarnThreshold}`);
+    reasons.push(
+      `${pending} product(s) pending, within the tolerance of ${pendingWarnThreshold}.`,
+    );
   }
 
-  const icon = { ok: ':white_check_mark:', warn: ':warning:', alert: ':rotating_light:' }[health];
-  const headline = {
-    ok: 'Image sync healthy',
-    warn: 'Image sync falling behind',
-    alert: 'Image sync needs attention',
-  }[health];
+  // Nothing changed in Unleashed at all. Only a fault if a much wider window is
+  // empty too — see ZERO_ACTIVITY_PROBE_DAYS for why a quiet day is not news.
+  if (scanned === 0) {
+    if (activity && activity.probeCount === 0) {
+      health = SYNC_HEALTH.ALERT;
+      headline = `no Unleashed activity in ${activity.probeDays} days`;
+      reasons.push(
+        `No Unleashed product has changed in ${activity.probeDays} days. A catalogue this ` +
+          'size does not go that long untouched, so the sync has most likely stopped ' +
+          'seeing Unleashed — check the API credentials and that the product feed is live.',
+      );
+    } else if (activity) {
+      reasons.push(
+        `No Unleashed changes in the last ${lookbackHours}h. Normal for a quiet day: ` +
+          `${activity.probeCount} product(s) changed in the last ${activity.probeDays} days, ` +
+          'so Unleashed is reachable and the sync is watching it.',
+      );
+    } else {
+      reasons.push(`No Unleashed changes in the last ${lookbackHours}h.`);
+    }
+  }
 
-  const lines = [
-    `${icon} *${headline}* — last ${lookbackHours}h`,
-    '',
-    `• checked: *${report?.scanned ?? 0}* products (*${report?.withImages ?? 0}* with images)`,
-    `• already correct: *${settled}*`,
-    `• pending: *${pending}*`,
-    `• failed: *${failed}*`,
-    `• unmatched SKUs: *${unmatched}*${ambiguous ? ` (+${ambiguous} ambiguous)` : ''}`,
-    `• declined by the ${''}image cap: *${capped}*`,
+  const rows = [
+    ['Checked', `${scanned} product(s), ${report?.withImages ?? 0} with images`],
+    ['Already correct', settled],
+    ['Pending', pending],
+    ['Failed', failed],
+    ['Unmatched SKUs', ambiguous ? `${unmatched} (+${ambiguous} ambiguous)` : unmatched],
+    ['Declined by the image cap', capped],
   ];
 
-  if (reasons.length) {
-    lines.push('', ...reasons.map((reason) => `> ${reason}`));
-  }
   if (report?.truncated) {
-    lines.push('', '> the check stopped early at its page cap; counts are a lower bound');
+    reasons.push('The check stopped early at its page cap, so these counts are a lower bound.');
   }
+
+  const title = `Image sync — last ${lookbackHours}h`;
+  const problems = collectProblems(report);
 
   return {
     health,
     reasons,
-    counts: { scanned: report?.scanned ?? 0, settled, pending, failed, unmatched, ambiguous, capped },
-    text: lines.join('\n'),
+    counts: { scanned, settled, pending, failed, unmatched, ambiguous, capped },
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] Image sync — ${headline}`,
+    text: buildText({ title, rows, reasons, problems: health === SYNC_HEALTH.OK ? [] : problems }),
+    html: buildHtml({
+      title,
+      health,
+      rows,
+      reasons,
+      problems: health === SYNC_HEALTH.OK ? [] : problems,
+    }),
   };
 }
 
@@ -82,20 +119,218 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours 
  * @param {object} report
  * @param {number} [max]
  */
-export function summariseProblems(report, max = 8) {
+export function collectProblems(report, max = 20) {
   const interesting = (report?.details ?? []).filter((detail) =>
     [SYNC_OUTCOME.FAILED, SYNC_OUTCOME.DRY_RUN, SYNC_OUTCOME.AMBIGUOUS].includes(detail.outcome),
   );
-  if (interesting.length === 0) return null;
 
-  const lines = interesting
-    .slice(0, max)
-    .map((detail) => `• \`${detail.productCode}\` — ${detail.outcome}${
-      detail.notes?.length ? `: ${detail.notes[0].slice(0, 90)}` : ''
-    }`);
+  const rows = interesting.slice(0, max).map((detail) => ({
+    productCode: detail.productCode ?? '(unknown)',
+    outcome: detail.outcome,
+    note: detail.notes?.[0]?.slice(0, 160) ?? '',
+  }));
 
   if (interesting.length > max) {
-    lines.push(`• …and ${interesting.length - max} more`);
+    rows.push({
+      productCode: `…and ${interesting.length - max} more`,
+      outcome: '',
+      note: '',
+    });
+  }
+  return rows;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Weekly catalogue audit                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Turns a whole-catalogue audit into the weekly email.
+ *
+ * Unlike the daily report this is a worklist, not an incident: the count only
+ * falls when someone fixes data in Unleashed or Shopify. It is deliberately
+ * weekly and deliberately carries the count in the subject line, so progress
+ * (or the lack of it) is visible without opening anything.
+ *
+ * @param {{ audit: object }} input
+ */
+export function buildAuditSummary({ audit }) {
+  const unmatched = audit?.unmatched ?? [];
+  const duplicates = audit?.duplicates ?? [];
+
+  const health = unmatched.length > 0 || duplicates.length > 0 ? SYNC_HEALTH.WARN : SYNC_HEALTH.OK;
+  const headline =
+    unmatched.length > 0
+      ? `${unmatched.length} product(s) with photos that cannot reach the site`
+      : 'every product with photos is matched';
+
+  const withSuggestion = unmatched.filter((row) => row.suggestion).length;
+
+  const rows = [
+    ['Unleashed products scanned', audit?.scanned ?? 0],
+    ['…of those, holding images', audit?.withImages ?? 0],
+    ['Matched to a Shopify SKU', audit?.matched ?? 0],
+    ['Unmatched (images stranded)', unmatched.length],
+    ['…with a likely SKU typo', withSuggestion],
+    ['Shopify SKUs on 2+ products', duplicates.length],
+    ['Shopify variant SKUs read', audit?.skuCount ?? 0],
+  ];
+
+  const reasons = [];
+  if (unmatched.length > 0) {
+    reasons.push(
+      `${unmatched.length} Unleashed product(s) hold images but no Shopify variant carries ` +
+        'their product code as a SKU, so those photos can never appear on the website.',
+    );
+  }
+  if (withSuggestion > 0) {
+    reasons.push(
+      `${withSuggestion} of them look like SKU mismatches rather than missing products — a ` +
+        'near-identical Shopify SKU exists. Those are the quickest wins; see the Suggestion column.',
+    );
+  }
+  if (duplicates.length > 0) {
+    reasons.push(
+      `${duplicates.length} SKU(s) appear on more than one Shopify product. The sync refuses ` +
+        'to guess which one owns the images and skips them entirely.',
+    );
+  }
+  if (audit?.truncated) {
+    reasons.push('The scan stopped at its page cap, so these counts are a lower bound.');
+  }
+  if (unmatched.length === 0 && duplicates.length === 0) {
+    reasons.push('Nothing to action — every Unleashed product with images resolves to a Shopify product.');
+  }
+
+  const inline = unmatched.slice(0, AUDIT_INLINE_LIMIT).map((row) => ({
+    productCode: row.productCode,
+    outcome: row.suggestion ? `did you mean ${row.suggestion}?` : 'not in Shopify',
+    note: `${row.imageCount} image(s) — ${row.description}`.slice(0, 160),
+  }));
+  if (unmatched.length > inline.length) {
+    inline.push({
+      productCode: `…and ${unmatched.length - inline.length} more in the attached CSV`,
+      outcome: '',
+      note: '',
+    });
+  }
+
+  const title = 'Image sync — weekly catalogue audit';
+
+  return {
+    health,
+    reasons,
+    counts: {
+      scanned: audit?.scanned ?? 0,
+      withImages: audit?.withImages ?? 0,
+      matched: audit?.matched ?? 0,
+      unmatched: unmatched.length,
+      withSuggestion,
+      duplicates: duplicates.length,
+    },
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] Image sync weekly audit — ${headline}`,
+    text: buildText({ title, rows, reasons, problems: inline }),
+    html: buildHtml({ title, health, rows, reasons, problems: inline }),
+  };
+}
+
+/**
+ * The full unmatched list as CSV, so it can be worked through in a spreadsheet
+ * rather than retyped out of an email.
+ *
+ * @param {object} audit
+ */
+export function buildAuditCsv(audit) {
+  const lines = ['product_code,images,likely_shopify_sku,description'];
+  for (const row of audit?.unmatched ?? []) {
+    lines.push(
+      [
+        csvCell(row.productCode),
+        csvCell(row.imageCount),
+        csvCell(row.suggestion),
+        csvCell(row.description),
+      ].join(','),
+    );
   }
   return lines.join('\n');
 }
+
+/* -------------------------------------------------------------------------- */
+/* Rendering                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function buildText({ title, rows, reasons, problems }) {
+  const lines = [title, '='.repeat(title.length), ''];
+  for (const [label, value] of rows) lines.push(`  ${label.padEnd(28)} ${value}`);
+
+  if (reasons.length) {
+    lines.push('', 'Notes', '-----');
+    for (const reason of reasons) lines.push(`  * ${reason}`);
+  }
+
+  if (problems.length) {
+    lines.push('', 'Products needing attention', '--------------------------');
+    for (const row of problems) {
+      lines.push(`  ${row.productCode}  ${row.outcome}${row.note ? `  — ${row.note}` : ''}`);
+    }
+  }
+
+  lines.push('', 'Sent by unleashed-media-sync (Azure: searay-unleashed-sync).');
+  return lines.join('\n');
+}
+
+const HEALTH_COLOUR = { ok: '#1a7f37', warn: '#9a6700', alert: '#b42318' };
+
+/**
+ * Deliberately plain, table-based HTML with inline styles — that is what
+ * survives Outlook, which is where these land.
+ */
+function buildHtml({ title, health, rows, reasons, problems }) {
+  const colour = HEALTH_COLOUR[health] ?? HEALTH_COLOUR.ok;
+
+  const summaryRows = rows
+    .map(
+      ([label, value]) =>
+        `<tr><td style="padding:6px 14px 6px 0;color:#555;">${escapeHtml(label)}</td>` +
+        `<td style="padding:6px 0;font-weight:600;">${escapeHtml(value)}</td></tr>`,
+    )
+    .join('');
+
+  const reasonList = reasons.length
+    ? `<ul style="margin:18px 0;padding-left:20px;color:#333;line-height:1.55;">${reasons
+        .map((reason) => `<li style="margin-bottom:6px;">${escapeHtml(reason)}</li>`)
+        .join('')}</ul>`
+    : '';
+
+  const problemTable = problems.length
+    ? `<h3 style="margin:24px 0 8px;font-size:15px;">Products needing attention</h3>
+       <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;width:100%;">
+         <tr style="text-align:left;border-bottom:1px solid #ddd;">
+           <th style="padding:6px 12px 6px 0;">Product code</th>
+           <th style="padding:6px 12px 6px 0;">Outcome</th>
+           <th style="padding:6px 0;">Detail</th>
+         </tr>
+         ${problems
+           .map(
+             (row) =>
+               `<tr style="border-bottom:1px solid #f0f0f0;">
+                  <td style="padding:6px 12px 6px 0;font-family:monospace;">${escapeHtml(row.productCode)}</td>
+                  <td style="padding:6px 12px 6px 0;">${escapeHtml(row.outcome)}</td>
+                  <td style="padding:6px 0;color:#555;">${escapeHtml(row.note)}</td>
+                </tr>`,
+           )
+           .join('')}
+       </table>`
+    : '';
+
+  return `<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;color:#111;max-width:720px;">
+  <h2 style="margin:0 0 4px;font-size:18px;">${escapeHtml(title)}</h2>
+  <p style="margin:0 0 18px;color:${colour};font-weight:700;text-transform:uppercase;letter-spacing:.04em;font-size:12px;">${escapeHtml(health)}</p>
+  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px;">${summaryRows}</table>
+  ${reasonList}
+  ${problemTable}
+  <p style="margin-top:28px;color:#888;font-size:12px;">Sent by unleashed-media-sync (Azure: searay-unleashed-sync).</p>
+</div>`;
+}
+
+export { buildText, buildHtml };

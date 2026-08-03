@@ -34,13 +34,17 @@ const { loadConfig } = await import('../src/utils/config.js');
 const { createUnleashedClient } = await import('../src/utils/unleashed.js');
 const { createShopifyClient } = await import('../src/utils/shopify.js');
 const { reconcile, syncByProductCode, lookbackSince } = await import('../src/utils/reconcile.js');
+const { auditCatalogue } = await import('../src/utils/audit.js');
+const { buildAuditCsv, buildAuditSummary } = await import('../src/utils/report.js');
 
 function parseArgs(argv) {
-  const args = { dryRun: false, all: false };
+  const args = { dryRun: false, all: false, audit: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--all') args.all = true;
+    else if (arg === '--audit') args.audit = true;
+    else if (arg === '--csv') args.csv = argv[++i];
     else if (arg === '--sku') args.sku = argv[++i];
     else if (arg === '--since') args.since = argv[++i];
     else if (arg === '--limit') args.limit = Number.parseInt(argv[++i], 10);
@@ -57,7 +61,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 
-if (args.help || (!args.sku && !args.since && !args.all)) {
+if (args.help || (!args.sku && !args.since && !args.all && !args.audit)) {
   console.log(
     [
       'Usage:',
@@ -67,6 +71,9 @@ if (args.help || (!args.sku && !args.since && !args.all)) {
       '',
       'Chunked catalogue pass (resumable — the report gives nextStartPage):',
       '  node scripts/sync-cli.js --all --start-page 1 --max-pages 8',
+      '',
+      'Weekly audit, read-only — products whose images can never reach the site:',
+      '  node scripts/sync-cli.js --audit [--csv reports/unmatched.csv]',
     ].join('\n'),
   );
   process.exit(args.help ? 0 : 1);
@@ -89,7 +96,15 @@ console.log(
     `delete removed: ${config.deleteRemovedMedia}  dry run: ${config.dryRun}`,
 );
 
-if (args.sku) {
+if (args.audit) {
+  const audit = await auditCatalogue({ unleashed, shopify, log });
+  console.log(`\n${buildAuditSummary({ audit }).text}\n`);
+  if (args.csv) {
+    fs.mkdirSync(path.dirname(path.resolve(args.csv)), { recursive: true });
+    fs.writeFileSync(path.resolve(args.csv), buildAuditCsv(audit));
+    console.log(`Wrote ${audit.unmatched.length} row(s) to ${args.csv}`);
+  }
+} else if (args.sku) {
   const result = await syncByProductCode({
     productCode: args.sku,
     unleashed,

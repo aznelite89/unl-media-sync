@@ -187,6 +187,25 @@ export function createUnleashedClient(config, log = console) {
   }
 
   /**
+   * How many products changed since `sinceIso`, without pulling any of them.
+   *
+   * Used to tell a quiet day apart from a broken feed: a silent 24 hours is
+   * ordinary, a silent week is not. Asks for one item and reads the total off
+   * the pagination envelope.
+   *
+   * @param {string} sinceIso
+   * @returns {Promise<number>}
+   */
+  async function countProductsModifiedSince(sinceIso) {
+    const page = await get(`/Products/${UNLEASHED_FIRST_PAGE}`, {
+      pageSize: 1,
+      modifiedSince: sinceIso,
+      includeObsolete: 'false',
+    });
+    return Number(page?.Pagination?.NumberOfItems ?? 0) || 0;
+  }
+
+  /**
    * Registers a webhook subscription. The returned `signatureKey` is shown once
    * only — store it in UNLEASHED_WEBHOOK_SIGNATURE_KEY immediately.
    *
@@ -216,7 +235,14 @@ export function createUnleashedClient(config, log = console) {
     return JSON.parse(body);
   }
 
-  return { get, getProductByGuid, getProductByCode, iterateProducts, createWebhookSubscription };
+  return {
+    get,
+    getProductByGuid,
+    getProductByCode,
+    iterateProducts,
+    countProductsModifiedSince,
+    createWebhookSubscription,
+  };
 }
 
 /**

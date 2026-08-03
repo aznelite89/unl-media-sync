@@ -181,7 +181,8 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `unleashedWebhook` | `POST /api/unleashed/product-webhook` (anonymous, HMAC-verified) | near-real-time sync on `product.created` / `product.updated` |
 | `reconcileMedia` | timer, every 10 min | re-reads the last `RECONCILE_LOOKBACK_MINUTES` — covers dropped deliveries and downtime |
 | `backfillMedia` | `GET|POST /api/unleashed/backfill` (function key) | operator runs: `?sku=`, `?since=YYYY-MM-DD`, `?all=true`, `&limit=`, `&dryRun=true` |
-| `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and reports health to Slack |
+| `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and emails a health summary |
+| `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 
 ### Why the daily report exists
 
@@ -199,22 +200,68 @@ never become a second writer.
 |---|---|
 | any product errored | **alert** |
 | pending > `PENDING_WARN_THRESHOLD` | **warn** — live sync is behind or broken |
+| no Unleashed changes in 24h **and** none in `ZERO_ACTIVITY_PROBE_DAYS` days | **alert** — the sync has stopped seeing Unleashed |
+| no changes in 24h but some within the probe window | OK — a quiet day, stated as such |
 | unmatched SKUs, capped images | reported, never alerts — these are steady-state facts, and a daily alert on them trains everyone to ignore the report |
 
-Set `SLACK_WEBHOOK_URL` to a Slack incoming webhook. Without it the summary still
-goes to Application Insights, so a missing webhook never breaks a deployment.
+The two-window check on activity is the point. A silent 24 hours is ordinary —
+weekends, holidays, a week nobody edits products — so alerting on it alone would
+fire most weekends and be filtered to trash before a real outage arrived. A
+catalogue this size going a **full week** without one modification is not
+ordinary, and that is what actually distinguishes quiet from broken.
 
-**Known limit:** this catches a sync that runs and misbehaves. It cannot catch a
-Function App that stops running altogether — no run, no message, and Slack
-cannot alert on silence. An availability alert in Application Insights would
-close that gap.
+### Why the weekly audit exists
+
+195 Unleashed products hold photographs that no shopper can ever see, because no
+Shopify variant carries their product code as a SKU. The daily report cannot
+find them: it only looks at the last 24 hours, so a product mismatched months ago
+never comes back round. Left alone the list quietly rots.
+
+The audit is a **set difference**, not a sync pass: it reads every Shopify
+variant SKU once (~25 requests) and diffs the whole Unleashed catalogue in
+memory. Asking Shopify per product would be thousands of requests and could not
+finish inside a function timeout.
+
+It separates the two cases, because they need different people:
+
+- **likely SKU typos** (18 of them) — a near-identical Shopify SKU exists, e.g.
+  `18KDSC10` against `18KDSC10W`, `9KC240-1` against `9KC240`. A one-character
+  data fix; the email names the suggestion.
+- **genuinely absent from Shopify** — the product needs creating, or it is not
+  meant to be online at all.
+
+The full list rides along as `unmatched-skus.csv` so it can be worked through in
+a spreadsheet rather than retyped out of an email. Only products that actually
+hold images are counted — a product with no photos has nothing stranded.
+
+This one **warns rather than alerts**, every week, until the count reaches zero.
+That is deliberate: it is a worklist, and carrying the count in the subject line
+makes progress visible without opening anything.
+
+Run it on demand with `node scripts/sync-cli.js --audit --csv reports/x.csv`.
+
+### Email delivery
+
+Reports go out through **Resend**, the same sender `searay-email-func` already
+uses for backorder notifications, so there is one verified sending domain rather
+than two. Set `RESEND_API_KEY` (a send-only key), `EMAIL_FROM` and `EMAIL_TO`.
+
+Without a key the summary still reaches Application Insights — email is how the
+report finds people, not the only place it exists, and a mail outage never
+breaks the sync.
+
+**Known limit:** this catches a sync that runs and misbehaves, and now also one
+that has stopped seeing Unleashed. It still cannot catch a Function App that
+stops running altogether — no run, no email, and nothing can alert on silence
+from inside the thing that went silent. An availability alert in Application
+Insights would close that last gap.
 
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 1. every module parses (`node --check`)
-2. the 36 offline tests — no credentials, so CI never touches the live store
+2. the 49 offline tests — no credentials, so CI never touches the live store
 3. each Function module imports and registers cleanly, which unit tests don't cover
 4. a credential guard: fails if a `shpat_`-style token or `local.settings.json`
    is ever committed. The repo is public, so a leaked key would be live the
@@ -235,6 +282,12 @@ Deliveries older than 5 minutes are rejected.
 | `DRY_RUN` | `false` | log the plan, change nothing |
 | `RECONCILE_LOOKBACK_MINUTES` | `60` | timer window |
 | `RECONCILE_MAX_PAGES` | `25` | page cap per run, a runaway guard. The catalogue is ~33 pages at the default `pageSize=200`, so raise it for a whole-catalogue pass; when the cap truncates a run it is logged, never silent |
+| `RESEND_API_KEY` | — | send-only Resend key, shared with `searay-email-func`. Unset means reports log only |
+| `EMAIL_FROM` | `Searay Image Sync <no-reply@searay.net.au>` | must be on a domain verified in Resend |
+| `EMAIL_TO` | `info@`, `christina.l@`, `thongz0819@live.com` | comma-separated; changing recipients needs no redeploy |
+| `DAILY_LOOKBACK_HOURS` | `24` | daily verification window |
+| `PENDING_WARN_THRESHOLD` | `5` | pending products tolerated before the daily report warns |
+| `ZERO_ACTIVITY_PROBE_DAYS` | `7` | how far back a silent day is checked before it counts as a fault |
 
 ## Suggested rollout
 

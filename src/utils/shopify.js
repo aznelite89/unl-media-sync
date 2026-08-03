@@ -3,6 +3,8 @@ import {
   MEDIA_PAGE_SIZE,
   RETRY,
   SHOPIFY_API_VERSION,
+  SHOPIFY_BULK_MAX_PAGES,
+  SHOPIFY_BULK_PAGE_SIZE,
   SHOPIFY_THROTTLED_CODE,
   SHOPIFY_TOKEN_HEADER,
   STATE_METAFIELD,
@@ -19,6 +21,29 @@ const FIND_PRODUCT_BY_SKU = /* GraphQL */ `
           id
           title
         }
+      }
+    }
+  }
+`;
+
+/**
+ * Every variant SKU in the store, for the weekly audit. Reading the whole set
+ * once and diffing in memory costs ~25 requests; asking Shopify per Unleashed
+ * product would cost thousands and could not finish inside a function timeout.
+ */
+const ALL_VARIANT_SKUS = /* GraphQL */ `
+  query AllVariantSkus($first: Int!, $after: String) {
+    productVariants(first: $first, after: $after) {
+      nodes {
+        sku
+        product {
+          id
+          title
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
   }
@@ -233,6 +258,59 @@ export function createShopifyClient(config, log = console) {
   }
 
   /**
+   * Every non-empty variant SKU in the store, lowercased, mapped to its product.
+   *
+   * @param {{ pageSize?: number, maxPages?: number }} [options]
+   * @returns {Promise<Map<string, { productId: string, title: string }>>}
+   */
+  async function listAllVariantSkus({
+    pageSize = SHOPIFY_BULK_PAGE_SIZE,
+    maxPages = SHOPIFY_BULK_MAX_PAGES,
+  } = {}) {
+    const skus = new Map();
+    let after = null;
+    let pages = 0;
+
+    for (;;) {
+      const data = await graphql(
+        ALL_VARIANT_SKUS,
+        { first: pageSize, after },
+        { label: 'listAllVariantSkus' },
+      );
+
+      const connection = data?.productVariants;
+      for (const node of connection?.nodes ?? []) {
+        const sku = String(node?.sku ?? '').trim().toLowerCase();
+        if (!sku) continue;
+
+        const productId = node.product?.id ?? null;
+        const existing = skus.get(sku);
+        if (!existing) {
+          skus.set(sku, { productId, title: node.product?.title ?? '', productCount: 1 });
+        } else if (existing.productId !== productId) {
+          // One SKU on two different products is a data fault the sync reports
+          // as `ambiguous` and refuses to act on, so the audit surfaces it.
+          existing.productCount += 1;
+        }
+      }
+
+      pages += 1;
+      if (!connection?.pageInfo?.hasNextPage) break;
+      if (pages >= maxPages) {
+        log.warn?.(
+          `listAllVariantSkus: stopped at ${pages} pages (${skus.size} SKUs); ` +
+            'the audit would under-report, raise SHOPIFY_BULK_MAX_PAGES.',
+        );
+        return skus;
+      }
+      after = connection.pageInfo.endCursor;
+    }
+
+    log.info?.(`listAllVariantSkus: ${skus.size} SKUs across ${pages} page(s)`);
+    return skus;
+  }
+
+  /**
    * @param {string} productId
    * @returns {Promise<{ id: string, title: string, media: object[], stateMetafield: object | null }>}
    */
@@ -351,6 +429,7 @@ export function createShopifyClient(config, log = console) {
   return {
     graphql,
     findProductsBySku,
+    listAllVariantSkus,
     getProduct,
     appendImage,
     detachMedia,
