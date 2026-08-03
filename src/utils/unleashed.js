@@ -66,6 +66,27 @@ export function verifyWebhook({ rawBody, signature, timestamp, signatureKey, now
  * @param {{ unleashed: { apiId: string, apiKey: string } }} config
  * @param {{ info?: Function, warn?: Function, error?: Function }} [log]
  */
+/**
+ * Builds the query string that is both signed and sent.
+ *
+ * Colons are left raw. `URLSearchParams` percent-encodes them, and Unleashed
+ * rejects `%3A` in the signed query string with a bare HTTP 403 — so every
+ * request carrying a `modifiedSince` timestamp fails while parameter-free
+ * requests succeed. A colon is a legal query character under RFC 3986, and
+ * sending it raw is what Unleashed's own examples do.
+ *
+ * @param {Record<string, string | number | undefined>} params
+ */
+export function buildQueryString(params) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') {
+      search.append(key, String(value));
+    }
+  }
+  return search.toString().replace(/%3A/g, ':');
+}
+
 export function createUnleashedClient(config, log = console) {
   const { apiId, apiKey } = config.unleashed;
 
@@ -74,14 +95,8 @@ export function createUnleashedClient(config, log = console) {
    * @param {Record<string, string | number | undefined>} [params]
    */
   async function get(path, params = {}) {
-    const search = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null && value !== '') {
-        search.append(key, String(value));
-      }
-    }
     // Sign exactly what goes on the wire — encoding must not diverge.
-    const queryString = search.toString();
+    const queryString = buildQueryString(params);
     const url = `${UNLEASHED_API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
 
     const response = await fetchWithRetry(

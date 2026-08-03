@@ -2,6 +2,9 @@
 
 ## 2026-08-03
 
+### Fixed
+- Unleashed rejects percent-encoded colons in the signed query string with a bare HTTP 403, so every request carrying `modifiedSince` was failing while parameter-free requests succeeded. The reconcile timer had been dead — the webhook path masked it, since it looks products up by Guid. Colons are now sent raw. Found within minutes of the new daily report going live, by the report itself.
+
 ### Added
 - `weeklyAudit` timer (Sun 22:30 UTC / Mon 08:30 AEST): whole-catalogue audit of Unleashed products that hold images but have no matching Shopify SKU — photographed stock no shopper can ever see. The daily report cannot find these because it only looks at the last 24 hours. First run: 195 products, 18 of them likely SKU typos with a suggested match, 2 SKUs on more than one Shopify product.
 - The full unmatched list attaches as `unmatched-skus.csv`, and `scripts/sync-cli.js --audit [--csv <path>]` runs the same audit on demand.

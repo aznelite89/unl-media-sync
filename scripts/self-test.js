@@ -27,7 +27,7 @@ import {
   parseState,
   syncUnleashedProduct,
 } from '../src/utils/sync.js';
-import { signQueryString, verifyWebhook } from '../src/utils/unleashed.js';
+import { buildQueryString, signQueryString, verifyWebhook } from '../src/utils/unleashed.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -666,6 +666,21 @@ test('free text from Unleashed is escaped before it reaches the HTML body', () =
   assert.ok(!summary.html.includes('<img src=x'));
   assert.ok(summary.html.includes('&lt;img'));
   assert.ok(summary.html.includes('a &amp; b'));
+});
+
+test('timestamps keep raw colons — %3A is rejected by Unleashed with a bare 403', () => {
+  // Regression guard on a live outage: URLSearchParams encodes ':' as '%3A',
+  // and Unleashed 403s the signed query string when it does. Every
+  // `modifiedSince` call failed while parameter-free calls succeeded, so the
+  // reconcile timer was dead while the webhook path looked fine.
+  const qs = buildQueryString({ pageSize: 1, modifiedSince: '2026-08-02T00:00:00' });
+  assert.ok(!qs.includes('%3A'), 'colons must not be percent-encoded');
+  assert.equal(qs, 'pageSize=1&modifiedSince=2026-08-02T00:00:00');
+
+  // Everything else stays encoded — only the colon is special-cased.
+  assert.equal(buildQueryString({ q: 'a b&c' }), 'q=a+b%26c');
+  // Empty and absent values are dropped, so they never reach the signature.
+  assert.equal(buildQueryString({ a: 1, b: undefined, c: '' }), 'a=1');
 });
 
 test('Unleashed request signature is HMAC-SHA256 of the query string, base64', () => {
