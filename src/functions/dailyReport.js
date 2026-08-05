@@ -6,7 +6,12 @@ import { toAttachment } from '../utils/email.js';
 import { toLog } from '../utils/logger.js';
 import { sendReport } from '../utils/notify.js';
 import { reconcile } from '../utils/reconcile.js';
-import { buildDailyCsv, buildDailySummary, orderedProblemDetails } from '../utils/report.js';
+import {
+  buildDailyCsv,
+  buildDailySummary,
+  buildDuplicateCsv,
+  orderedProblemDetails,
+} from '../utils/report.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import { createUnleashedClient } from '../utils/unleashed.js';
 
@@ -89,6 +94,13 @@ async function handler(timer, context) {
   const attachments = problems.length
     ? [toAttachment('image-sync-detail.csv', buildDailyCsv(report))]
     : [];
+
+  // Same format as the weekly sweep's CSV, so the two are directly comparable.
+  if (report.duplicates?.products?.length) {
+    attachments.push(
+      toAttachment('image-sync-duplicates.csv', buildDuplicateCsv(report.duplicates)),
+    );
+  }
 
   const delivery = await sendReport({ config, summary, attachments, log });
   log.info(

@@ -16,12 +16,14 @@
 
 import {
   DUPLICATE_KIND,
+  DUPLICATE_SCAN_BUDGET_MS,
+  FOREIGN_DUPLICATE_KINDS,
   MEDIA_ORIGIN,
   SHOPIFY_ACCESS_DENIED_CODE,
   SHOPIFY_DETACH_SCOPE,
 } from '../constants/index.js';
 import { contentKey, shopifyFingerprint } from './imageFingerprint.js';
-import { parseState } from './sync.js';
+import { parseState } from './state.js';
 
 /**
  * Groups one product's media by picture, returning only the pictures present
@@ -118,45 +120,106 @@ export function planDuplicateCleanup(groups) {
 }
 
 /**
- * Scans the whole store for duplicated pictures.
+ * True when a group contains a copy no state entry owns — i.e. something other
+ * than this service put a copy of this picture on the page. See
+ * FOREIGN_DUPLICATE_KINDS for why this, and not "any duplicate", drives alerting.
  *
- * @param {{ shopify: object, log?: object, apply?: boolean }} input
+ * @param {{ kind: string }} group
  */
-export async function auditDuplicates({ shopify, log = console, apply = false }) {
-  const products = [];
+export function isForeignDuplicate(group) {
+  return FOREIGN_DUPLICATE_KINDS.includes(group?.kind);
+}
+
+/**
+ * Rolls per-product findings into the totals both reports quote.
+ *
+ * Shared by the daily pass (which sees only the products it synced) and the
+ * weekly sweep (which sees the whole store), so the two can differ in coverage
+ * but never in arithmetic.
+ *
+ * @param {Array<{ groups: object[] }>} products
+ */
+export function summariseDuplicateGroups(products) {
   const byKind = {
     [DUPLICATE_KIND.MIXED]: 0,
     [DUPLICATE_KIND.ALL_UNMANAGED]: 0,
     [DUPLICATE_KIND.ALL_MANAGED]: 0,
   };
-  let scanned = 0;
+  let groups = 0;
   let wastedSlots = 0;
+  let foreignGroups = 0;
+  let repairable = 0;
 
-  for await (const page of shopify.iterateProductsWithMedia()) {
-    for (const product of page.products) {
-      scanned += 1;
-      const state = parseState(product.metafield);
-      const groups = findDuplicateGroups({ media: product.media?.nodes ?? [], state });
-      if (groups.length === 0) continue;
-
-      for (const group of groups) {
-        byKind[group.kind] += 1;
-        wastedSlots += group.copies.length - 1;
-      }
-
-      products.push({
-        productId: product.id,
-        title: product.title ?? '',
-        mediaCount: (product.media?.nodes ?? []).length,
-        groups,
-        removals: planDuplicateCleanup(groups),
-      });
+  for (const product of products ?? []) {
+    for (const group of product.groups ?? []) {
+      groups += 1;
+      byKind[group.kind] += 1;
+      wastedSlots += group.copies.length - 1;
+      if (isForeignDuplicate(group)) foreignGroups += 1;
     }
-    log.info?.(`duplicate scan: page ${page.pageNumber} — ${scanned} products, ${products.length} affected`);
+    repairable += (product.removals ?? []).length;
   }
 
-  const repairable = products.reduce((total, product) => total + product.removals.length, 0);
-  const result = { scanned, products, byKind, wastedSlots, repairable, detached: 0, failures: [] };
+  return { productsAffected: (products ?? []).length, groups, wastedSlots, foreignGroups, byKind, repairable };
+}
+
+/**
+ * Scans the whole store for duplicated pictures.
+ *
+ * @param {{ shopify: object, log?: object, apply?: boolean, budgetMs?: number }} input
+ */
+export async function auditDuplicates({
+  shopify,
+  log = console,
+  apply = false,
+  budgetMs = DUPLICATE_SCAN_BUDGET_MS,
+}) {
+  const products = [];
+  const startedAt = Date.now();
+  let scanned = 0;
+  let truncated = null;
+
+  try {
+    for await (const page of shopify.iterateProductsWithMedia()) {
+      for (const product of page.products) {
+        scanned += 1;
+        const state = parseState(product.metafield);
+        const groups = findDuplicateGroups({ media: product.media?.nodes ?? [], state });
+        if (groups.length === 0) continue;
+
+        products.push({
+          productId: product.id,
+          title: product.title ?? '',
+          mediaCount: (product.media?.nodes ?? []).length,
+          groups,
+          removals: planDuplicateCleanup(groups),
+        });
+      }
+      log.info?.(`duplicate scan: page ${page.pageNumber} — ${scanned} products, ${products.length} affected`);
+
+      // Stop ourselves before the host does. Being killed mid-sweep would send no
+      // report at all, which is worse than an honestly partial one.
+      if (budgetMs !== null && Date.now() - startedAt >= budgetMs) {
+        truncated = `stopped after ${scanned} product(s): the ${Math.round(budgetMs / 1000)}s scan budget ran out`;
+        log.warn?.(`duplicate scan: ${truncated}`);
+        break;
+      }
+    }
+  } catch (error) {
+    // Losing every finding to one throttled page would defeat the point; report
+    // what was gathered and say it is incomplete.
+    truncated = `stopped after ${scanned} product(s): ${error.message}`;
+    log.error?.(`duplicate scan: ${truncated}`);
+  }
+
+  const result = {
+    scanned,
+    products,
+    truncated,
+    ...summariseDuplicateGroups(products),
+    detached: 0,
+    failures: [],
+  };
 
   if (!apply) return result;
 

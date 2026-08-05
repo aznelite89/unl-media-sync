@@ -308,11 +308,36 @@ export const DUPLICATE_KIND = {
   ALL_MANAGED: 'all_managed',
 };
 
+/**
+ * Duplicate groups that mean SOMETHING ELSE put a copy on the page — one or more
+ * copies belong to no state entry.
+ *
+ * This is what a health verdict keys on, never "any duplicate". A product whose
+ * Unleashed images include two byte-identical files uploads both (dedup happens
+ * against the Shopify page, not within one product's own `Images[]`), producing
+ * an `all_managed` group on every run forever. Warning on that daily would be
+ * exactly the noise that teaches people to ignore the report.
+ */
+export const FOREIGN_DUPLICATE_KINDS = [DUPLICATE_KIND.MIXED, DUPLICATE_KIND.ALL_UNMANAGED];
+
 /** Products per page when scanning the store for duplicate media. */
 export const DUPLICATE_SCAN_PAGE_SIZE = 50;
 
-/** Media inspected per product during that scan; the page cap is far below this. */
-export const DUPLICATE_SCAN_MEDIA_SIZE = 50;
+/**
+ * Media inspected per product during that scan. Four times the page cap of 5, so
+ * a duplicate beyond it would already be on a product far outside policy — and
+ * the scan warns rather than truncating silently. Kept low because the sweep is
+ * throttle-bound: cost scales with products x media, so this halves wall-clock.
+ */
+export const DUPLICATE_SCAN_MEDIA_SIZE = 20;
 
 /** Guard against a runaway duplicate scan. */
 export const DUPLICATE_SCAN_MAX_PAGES = 200;
+
+/**
+ * Wall-clock ceiling for a whole-store sweep, under `host.json`'s 10-minute
+ * `functionTimeout`. A host-killed invocation sends NO email at all — the exact
+ * silent failure this watch exists to prevent — so the sweep stops itself early
+ * and reports a partial, explicitly-truncated result instead.
+ */
+export const DUPLICATE_SCAN_BUDGET_MS = 7 * 60_000;
