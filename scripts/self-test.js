@@ -18,11 +18,20 @@ import {
   buildAuditSummary,
   buildDailyCsv,
   buildDailySummary,
+  buildDuplicateCsv,
+  buildDuplicateSummary,
   collectProblems,
   orderedProblemDetails,
 } from '../src/utils/report.js';
 import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
-import { findDuplicateGroups, planDuplicateCleanup } from '../src/utils/duplicates.js';
+import {
+  findDuplicateGroups,
+  isForeignDuplicate,
+  planDuplicateCleanup,
+  summariseDuplicateGroups,
+  auditDuplicates,
+} from '../src/utils/duplicates.js';
+import { reconcile } from '../src/utils/reconcile.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
 import {
   contentKey,
@@ -925,6 +934,212 @@ test('a content key separates same-size pictures by their thumbhash', () => {
   assert.equal(contentKey(a), contentKey({ ...a }));
 });
 
+// --- duplicate surveillance: catching a second writer without being asked ----
+
+test('only duplicates involving a copy we do not own count as foreign', () => {
+  // An all-managed group is self-inflicted: two byte-identical Unleashed images
+  // on one product both upload, every run, forever. Alerting on that is how a
+  // daily report gets filtered to trash.
+  assert.equal(isForeignDuplicate({ kind: DUPLICATE_KIND.MIXED }), true);
+  assert.equal(isForeignDuplicate({ kind: DUPLICATE_KIND.ALL_UNMANAGED }), true);
+  assert.equal(isForeignDuplicate({ kind: DUPLICATE_KIND.ALL_MANAGED }), false);
+});
+
+test('an empty duplicate summary is all zeroes, never undefined', () => {
+  // The daily row must be able to print `0` — an absent row is indistinguishable
+  // from "this check was never deployed".
+  const summary = summariseDuplicateGroups([]);
+  assert.deepEqual(
+    { ...summary, byKind: undefined },
+    {
+      productsAffected: 0,
+      groups: 0,
+      wastedSlots: 0,
+      foreignGroups: 0,
+      repairable: 0,
+      byKind: undefined,
+    },
+  );
+});
+
+test('duplicate totals count wasted slots, not copies', () => {
+  const groups = findDuplicateGroups({ media: [HAND_UPLOADED, SYNC_OWNED], state: STATE_OWNING_OURS });
+  const summary = summariseDuplicateGroups([
+    { groups, removals: planDuplicateCleanup(groups) },
+  ]);
+  assert.equal(summary.groups, 1);
+  assert.equal(summary.wastedSlots, 1, 'two copies of one picture waste one slot');
+  assert.equal(summary.foreignGroups, 1);
+  assert.equal(summary.repairable, 1);
+});
+
+const duplicateShopifyStub = (media, stateValue) => ({
+  findProductsBySku: async () => ({
+    products: [{ id: 'gid://shopify/Product/1', title: 'Dup Product' }],
+    variantIds: [],
+  }),
+  getProduct: async () => ({
+    id: 'gid://shopify/Product/1',
+    title: 'Dup Product',
+    media,
+    stateMetafield: stateValue ? { value: JSON.stringify(stateValue) } : null,
+  }),
+  appendImage: async () => ({ media: { id: 'gid://shopify/MediaImage/new' }, allMedia: [] }),
+  detachMedia: async () => assert.fail('a sync pass must never detach media'),
+  reorderMedia: async () => null,
+  saveState: async () => [],
+});
+
+const DUP_CONFIG = {
+  maxSyncedImages: 5,
+  maxMediaPerProduct: 5,
+  deleteRemovedMedia: false,
+  reorderMedia: true,
+  dryRun: true,
+};
+
+test('a duplicate on the page is reported by the sync, and nothing is detached', async () => {
+  const result = await syncUnleashedProduct({
+    unleashedProduct: {
+      ProductCode: '9KDP663-1',
+      Guid: 'g',
+      Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }],
+    },
+    shopify: duplicateShopifyStub([HAND_UPLOADED, SYNC_OWNED], STATE_OWNING_OURS),
+    config: DUP_CONFIG,
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.duplicates?.groups.length, 1);
+  assert.equal(result.duplicates.productId, 'gid://shopify/Product/1');
+  assert.equal(result.duplicates.removals.length, 1, 'counted as repairable, but not repaired');
+  assert.ok(result.notes.some((note) => note.includes('more than once')));
+});
+
+test('a clean product reports no duplicates at all', async () => {
+  const result = await syncUnleashedProduct({
+    unleashedProduct: {
+      ProductCode: 'CLEAN',
+      Guid: 'g',
+      Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }],
+    },
+    shopify: duplicateShopifyStub([SYNC_OWNED], STATE_OWNING_OURS),
+    config: DUP_CONFIG,
+    log: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(result.duplicates, null);
+});
+
+/** Minimal Unleashed stub: one page of the given products. */
+const unleashedStub = (items) => ({
+  async *iterateProducts() {
+    yield { items, pageNumber: 1, totalPages: 1 };
+  },
+});
+
+test('sibling codes on one Shopify product report their duplicate once, not twice', async () => {
+  // 18K101-3 and -4 are sizes of one ring and resolve to the same Shopify
+  // product. Both see the same duplicate group on the same page.
+  const report = await reconcile({
+    unleashed: unleashedStub([
+      { ProductCode: '18K101-3', Guid: 'a', Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }] },
+      { ProductCode: '18K101-4', Guid: 'b', Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }] },
+    ]),
+    shopify: duplicateShopifyStub([HAND_UPLOADED, SYNC_OWNED], STATE_OWNING_OURS),
+    config: DUP_CONFIG,
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(report.duplicates.productsAffected, 1, 'one Shopify product, one finding');
+  assert.equal(report.duplicates.groups, 1);
+  assert.equal(report.duplicates.wastedSlots, 1, 'must not be double counted');
+});
+
+test('a duplicate on an UNCHANGED product still reaches the report', async () => {
+  // `details` drops unchanged results as noise, and a duplicate almost always
+  // sits on a product whose images are otherwise already correct — so riding on
+  // `details` would have thrown away most findings.
+  const report = await reconcile({
+    unleashed: unleashedStub([
+      { ProductCode: '9KDP663-1', Guid: 'a', Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }] },
+    ]),
+    shopify: duplicateShopifyStub([HAND_UPLOADED, SYNC_OWNED], STATE_OWNING_OURS),
+    config: { ...DUP_CONFIG, dryRun: false },
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(report.details.length, 0, 'the product itself is unremarkable');
+  assert.equal(report.duplicates.groups, 1, 'but its duplicate is still reported');
+});
+
+test('the whole-store sweep stops on its own budget rather than being killed', async () => {
+  let pages = 0;
+  const shopify = {
+    async *iterateProductsWithMedia() {
+      for (let i = 0; i < 5; i += 1) {
+        pages += 1;
+        yield { products: [], pageNumber: i + 1 };
+      }
+    },
+    detachMedia: async () => assert.fail('the sweep is read-only'),
+  };
+
+  const audit = await auditDuplicates({ shopify, log: { info() {}, warn() {}, error() {} }, budgetMs: 0 });
+  assert.equal(pages, 1, 'stops after the first page once the budget is spent');
+  assert.ok(audit.truncated, 'and says so, so the count reads as a lower bound');
+});
+
+test('a page that throws mid-sweep keeps the findings gathered so far', async () => {
+  const shopify = {
+    async *iterateProductsWithMedia() {
+      yield { products: [], pageNumber: 1 };
+      throw new Error('Shopify still throttled after 4 attempts');
+    },
+    detachMedia: async () => assert.fail('the sweep is read-only'),
+  };
+
+  const audit = await auditDuplicates({ shopify, log: { info() {}, warn() {}, error() {} } });
+  assert.ok(audit.truncated.includes('throttled'));
+  assert.equal(audit.scanned, 0, 'partial result, not a thrown error');
+});
+
+test('the weekly sweep is a worklist: WARN while anything is duplicated', () => {
+  const groups = findDuplicateGroups({ media: [HAND_UPLOADED, SYNC_OWNED], state: STATE_OWNING_OURS });
+  const audit = {
+    scanned: 3375,
+    products: [{ productId: 'gid://shopify/Product/1', title: 'P', groups, removals: planDuplicateCleanup(groups) }],
+    ...summariseDuplicateGroups([{ groups, removals: planDuplicateCleanup(groups) }]),
+  };
+
+  const warned = buildDuplicateSummary({ audit });
+  assert.equal(warned.health, SYNC_HEALTH.WARN);
+  assert.ok(warned.subject.includes('1 duplicated picture'));
+
+  const clean = buildDuplicateSummary({ audit: { scanned: 3375, products: [], ...summariseDuplicateGroups([]) } });
+  assert.equal(clean.health, SYNC_HEALTH.OK);
+  assert.ok(clean.reasons.some((r) => r.includes('No duplicated media')));
+});
+
+test('a sweep that ran out of budget reports itself as a lower bound', () => {
+  const summary = buildDuplicateSummary({
+    audit: { scanned: 900, products: [], truncated: 'stopped after 900 product(s): budget ran out', ...summariseDuplicateGroups([]) },
+  });
+  assert.ok(summary.reasons.some((r) => r.includes('lower bound')));
+});
+
+test('daily and weekly duplicate CSVs are the same format', () => {
+  // The daily result is shaped like one element of the weekly sweep's `products`,
+  // so a single CSV builder serves both and the two can be diffed directly.
+  const groups = findDuplicateGroups({ media: [HAND_UPLOADED, SYNC_OWNED], state: STATE_OWNING_OURS });
+  const product = { productId: 'gid://shopify/Product/1', title: 'P', groups, removals: planDuplicateCleanup(groups) };
+
+  const weekly = buildDuplicateCsv({ products: [product] });
+  const daily = buildDuplicateCsv({ products: [product] });
+  assert.equal(weekly, daily);
+  assert.ok(weekly.split('\n')[0].startsWith('kind,shopify_product_id'));
+  assert.equal(weekly.split('\n').length, 3, 'header plus both copies of the picture');
+});
+
 // --- daily report health verdict ---------------------------------------------
 
 const summaryOf = (byOutcome, extra = {}) =>
@@ -954,6 +1169,74 @@ test('failures outrank pending work rather than being masked by it', () => {
   const s = summaryOf({ dry_run: 99, failed: 2 });
   assert.equal(s.health, SYNC_HEALTH.ALERT, 'must not be downgraded to warn');
   assert.equal(s.reasons.length, 2, 'both problems reported');
+});
+
+const duplicateCounts = (over) => ({
+  productsChecked: 40,
+  productsAffected: 0,
+  groups: 0,
+  foreignGroups: 0,
+  wastedSlots: 0,
+  products: [],
+  ...over,
+});
+
+test('a clean day still prints a duplicate count of zero', () => {
+  // A missing row is indistinguishable from "not deployed"; a visible 0 is
+  // positive confirmation the check ran.
+  const s = summaryOf({ unchanged: 60 }, { duplicates: duplicateCounts() });
+  assert.equal(s.health, SYNC_HEALTH.OK);
+  assert.equal(s.counts.duplicates, 0);
+  assert.ok(s.text.includes('Duplicated pictures'));
+});
+
+test("a picture copied by something else warns, and says what to do", () => {
+  const s = summaryOf(
+    { unchanged: 60 },
+    { duplicates: duplicateCounts({ productsAffected: 2, groups: 2, foreignGroups: 2, wastedSlots: 2 }) },
+  );
+  assert.equal(s.health, SYNC_HEALTH.WARN);
+  assert.equal(s.counts.foreignDuplicates, 2);
+  assert.ok(
+    s.reasons.some((r) => r.includes('--duplicates')),
+    'the report must carry the remedy, not just the count',
+  );
+  assert.ok(
+    s.reasons.some((r) => r.includes('Syncio')),
+    'and name the known cause so nobody has to rediscover it',
+  );
+});
+
+test('duplicates this sync created itself do NOT move the verdict', () => {
+  // Two byte-identical images on one Unleashed product both upload, on every run,
+  // forever. Warning daily on a self-inflicted steady state is how a report earns
+  // an inbox filter.
+  const s = summaryOf(
+    { unchanged: 60 },
+    { duplicates: duplicateCounts({ productsAffected: 3, groups: 3, foreignGroups: 0, wastedSlots: 3 }) },
+  );
+  assert.equal(s.health, SYNC_HEALTH.OK, 'counted and listed, but not alarming');
+  assert.equal(s.counts.duplicates, 3);
+  assert.ok(s.reasons.some((r) => r.includes('do not indicate another writer')));
+});
+
+test('duplicates never downgrade a failure alert', () => {
+  const s = summaryOf(
+    { unchanged: 59, failed: 1 },
+    { duplicates: duplicateCounts({ productsAffected: 1, groups: 1, foreignGroups: 1, wastedSlots: 1 }) },
+  );
+  assert.equal(s.health, SYNC_HEALTH.ALERT);
+});
+
+test('the daily duplicate count says it is a floor, not a store-wide total', () => {
+  const s = summaryOf(
+    { unchanged: 60 },
+    { duplicates: duplicateCounts({ productsAffected: 1, groups: 1, foreignGroups: 1, wastedSlots: 1 }) },
+  );
+  assert.ok(
+    s.reasons.some((r) => r.includes('not the') && r.includes('whole store')),
+    'or the weekly sweep reporting a bigger number will look like a bug',
+  );
 });
 
 test('unmatched and capped are reported but never alert', () => {

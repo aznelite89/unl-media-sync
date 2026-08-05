@@ -44,6 +44,16 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
   const ambiguous = byOutcome[SYNC_OUTCOME.AMBIGUOUS] ?? 0;
   const capped = byOutcome[SYNC_OUTCOME.CAPPED] ?? 0;
   const settled = byOutcome[SYNC_OUTCOME.UNCHANGED] ?? 0;
+  // Zeroes, not undefined: the row must read `0` rather than vanish, so a healthy
+  // report positively confirms the check ran.
+  const duplicates = {
+    productsChecked: 0,
+    productsAffected: 0,
+    groups: 0,
+    foreignGroups: 0,
+    wastedSlots: 0,
+    ...(report?.duplicates ?? {}),
+  };
 
   let health = SYNC_HEALTH.OK;
   let headline = 'nothing outstanding';
@@ -65,6 +75,41 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
   } else if (pending > 0) {
     reasons.push(
       `${pending} product(s) pending, within the tolerance of ${pendingWarnThreshold}.`,
+    );
+  }
+
+  // Only FOREIGN duplicates move the verdict — a copy no state entry owns, i.e.
+  // one something else put there. `all_managed` groups are self-inflicted (two
+  // byte-identical Unleashed images on one product both upload) and recur on
+  // every run forever; warning on those daily is how a report gets ignored.
+  //
+  // WARN, never ALERT: ALERT in this report means the sync is broken or blind.
+  // A duplicate is a data condition with a manual remedy.
+  if (duplicates.foreignGroups > 0) {
+    if (health === SYNC_HEALTH.OK) {
+      health = SYNC_HEALTH.WARN;
+      headline = `${duplicates.foreignGroups} duplicated picture(s)`;
+    }
+    reasons.push(
+      `${duplicates.foreignGroups} picture(s) on ${duplicates.productsAffected} product(s) have a ` +
+        'copy this sync did not add — something else put the same photograph on the page. ' +
+        'Syncio\'s image sync is the known cause: confirm it is still off, then run ' +
+        '`node scripts/sync-cli.js --duplicates` and `--duplicates --apply` to clear them.',
+    );
+    reasons.push(
+      `Counted across the ${duplicates.productsChecked} product(s) checked in this window, not the ` +
+        'whole store — a second writer can also touch products Unleashed has not changed, which ' +
+        'this pass never visits. The weekly duplicate sweep is the complete number.',
+    );
+  }
+
+  // Reported without changing the verdict: this service created them and its own
+  // cleanup command fixes them.
+  if (duplicates.groups > duplicates.foreignGroups) {
+    reasons.push(
+      `${duplicates.groups - duplicates.foreignGroups} further duplicate(s) are copies this sync ` +
+        'itself added, from Unleashed products holding the same file twice. Clear with ' +
+        '`--duplicates --apply`; they do not indicate another writer.',
     );
   }
 
@@ -97,6 +142,12 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
     ['Failed', failed],
     ['Unmatched SKUs', ambiguous ? `${unmatched} (+${ambiguous} ambiguous)` : unmatched],
     ['Declined by the image cap', capped],
+    [
+      'Duplicated pictures',
+      duplicates.groups === 0
+        ? 0
+        : `${duplicates.groups} (${duplicates.foreignGroups} from another writer)`,
+    ],
   ];
 
   if (report?.truncated) {
@@ -109,7 +160,17 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
   return {
     health,
     reasons,
-    counts: { scanned, settled, pending, failed, unmatched, ambiguous, capped },
+    counts: {
+      scanned,
+      settled,
+      pending,
+      failed,
+      unmatched,
+      ambiguous,
+      capped,
+      duplicates: duplicates.groups,
+      foreignDuplicates: duplicates.foreignGroups,
+    },
     subject: `[${EMAIL_SUBJECT_TAG[health]}] Image sync — ${headline}`,
     text: buildText({ title, rows, reasons, problems, problemHeading: DAILY_PROBLEM_HEADING }),
     html: buildHtml({
@@ -367,23 +428,38 @@ export function buildDuplicateCsv(audit) {
 }
 
 /**
- * Plain-text summary of a duplicate scan for the CLI.
+ * Summary of a whole-store duplicate scan, for the CLI and the weekly email.
+ *
+ * Always WARN while anything is duplicated, in the same spirit as the unmatched
+ * SKU audit: this is a worklist, and it should keep asking until it is empty.
+ * Weekly, so it cannot become daily background noise.
  *
  * @param {{ audit: object, applied?: boolean }} input
  */
 export function buildDuplicateSummary({ audit, applied = false }) {
   const byKind = audit?.byKind ?? {};
+  const groups = Object.values(byKind).reduce((sum, n) => sum + n, 0);
+  const affected = (audit?.products ?? []).length;
   const title = 'Image sync — duplicate media scan';
   const rows = [
     ['Products scanned', String(audit?.scanned ?? 0)],
-    ['Products with duplicates', String((audit?.products ?? []).length)],
-    ['Duplicated pictures', String(Object.values(byKind).reduce((sum, n) => sum + n, 0))],
+    ['Products with duplicates', String(affected)],
+    ['Duplicated pictures', String(groups)],
     ['Wasted image slots', String(audit?.wastedSlots ?? 0)],
     ['Safe to repair', String(audit?.repairable ?? 0)],
   ];
   if (applied) rows.push(['Detached', String(audit?.detached ?? 0)]);
 
+  const health = groups > 0 ? SYNC_HEALTH.WARN : SYNC_HEALTH.OK;
+  const headline = groups > 0 ? `${groups} duplicated picture(s)` : 'no duplicated media';
+
   const reasons = [];
+  if (audit?.truncated) {
+    reasons.push(
+      `The sweep did not finish — ${audit.truncated}. These counts are a lower bound; ` +
+        'run `node scripts/sync-cli.js --duplicates` locally for the complete picture.',
+    );
+  }
   if (byKind[DUPLICATE_KIND.MIXED] > 0) {
     reasons.push(
       `${byKind[DUPLICATE_KIND.MIXED]} picture(s) exist as one hand-uploaded copy plus one this ` +
@@ -416,14 +492,20 @@ export function buildDuplicateSummary({ audit, applied = false }) {
   }));
 
   return {
+    health,
+    reasons,
     counts: {
       scanned: audit?.scanned ?? 0,
-      affected: (audit?.products ?? []).length,
+      affected,
+      groups,
+      foreignGroups: audit?.foreignGroups ?? 0,
       wastedSlots: audit?.wastedSlots ?? 0,
       repairable: audit?.repairable ?? 0,
       detached: audit?.detached ?? 0,
     },
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] Image sync duplicate scan — ${headline}`,
     text: buildText({ title, rows, reasons, problems, problemHeading: 'Affected products' }),
+    html: buildHtml({ title, health, rows, reasons, problems, problemHeading: 'Affected products' }),
   };
 }
 

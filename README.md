@@ -88,6 +88,34 @@ Because a sibling's copy can now be claimed, **one media item can be referenced 
 codes' state entries**. Removal accounts for that: a code that drops an image never detaches media
 another code still points at, or the photograph would vanish for every variant still using it.
 
+### The duplicate watch
+
+A second writer putting its own copy of a photograph on a product is invisible from inside this
+service: the sync completes, the images are correct, and one extra file sits on the page quietly
+eating a cap slot. That is how the 9KDP663-1 duplicate survived months, and how 1,197 more
+accumulated. So it is watched from two directions:
+
+| | covers | cost | verdict |
+| --- | --- | --- | --- |
+| **daily**, inside the existing verification pass | only the products it synced that day | **free** — the media and state are already fetched | WARN when a copy this sync did not add is found |
+| **weekly**, `weeklyDuplicateAudit` | the whole store | one sweep, its own 10-minute budget | WARN while anything is duplicated |
+
+The daily number is a **floor, not a total**, and the email says so. A second writer can add a copy
+to a product Unleashed has not changed, and the daily pass only visits products Unleashed *has*
+changed — so the weekly census is the number to trust. Both emit the same `image-sync-duplicates.csv`
+format, so they can be diffed directly.
+
+Only **foreign** duplicates — groups holding a copy no state entry owns — move the daily verdict. A
+product whose Unleashed images include two byte-identical files uploads both (dedup happens against
+the Shopify page, not within one product's own `Images[]`), producing a duplicate on every run
+forever. Those are counted and listed but never warned about; warning daily on a self-inflicted
+steady state is how a report earns an inbox filter.
+
+Neither job ever writes. `dailyReport` forces `DRY_RUN`, `weeklyDuplicateAudit` passes `apply: false`
+as a literal — there is deliberately no app setting that could turn a reporting job into a writer.
+Repair stays a human act, taken *after* confirming the other writer is off; auto-repairing against a
+live second writer would just fight it in a loop on a customer-facing product.
+
 ### Finding duplicates that already exist
 
 ```bash
@@ -254,6 +282,7 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `backfillMedia` | `GET|POST /api/unleashed/backfill` (function key) | operator runs: `?sku=`, `?since=YYYY-MM-DD`, `?all=true`, `&limit=`, `&dryRun=true` |
 | `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and emails a health summary |
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
+| `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
 
 ### Why the daily report exists
 
@@ -395,21 +424,27 @@ Deliveries older than 5 minutes are rejected.
   copy of a picture already on the page. It cannot stop another integration adding its copy
   *afterwards* — whoever writes second creates the duplicate.
 
-  As of 2026-08-05 that second writer is **`Syncio Multi Store Sync`**, which mirrors products into
-  this store from another Shopify store and brings their images under the source store's SKU-based
-  filenames (`9KDR704YSIZEM_1.png`), while this service uploads the same pictures from Unleashed
-  under GUID filenames. 79% of the catalogue (2,656 of 3,375 products) is Syncio-managed, tagged
-  `syncio-hidden`. Until image sync is disabled on the Syncio connection, duplicates reappear on
-  whichever products Syncio touches after this service has run, and `--duplicates --apply` is a
-  treadmill rather than a fix.
+  A second writer is demonstrably active. Byte-identical copies of Unleashed photographs keep
+  appearing under their **human** filenames (`9KDR704YSIZEM_1.png`) alongside the GUID-named copies
+  this service uploads, on products this service manages, owned by no state entry.
 
-  Unleashed's own connector is not the cause — its `Default Image → Product Image` toggle is off,
-  and it only ever covered one default image, never the numbered `_1`/`_2` files.
+  **What it is has not been established.** Ruled out as of 2026-08-05:
 
-  > Shopify logs no event and exposes no creator field for file uploads, so a second writer can only
-  > be identified indirectly — by app tags on the product (`syncio-hidden`) and by `updatedAt`
-  > landing within seconds of the file's `createdAt`. Timing alone proves nothing: this service's
-  > own backfills are bursty and look equally "human".
+  | Suspect | Ruled out because |
+  | --- | --- |
+  | Unleashed's own connector | `Default Image → Product Image` is off, and it only ever covered a single default image — never the numbered `_1`/`_2` files |
+  | `Syncio Multi Store Sync` | `for-discovery` is a **Source-only** store in Syncio: it pushes out to Speirs Jewellers and Quarter Carat and is not a destination, so Syncio never writes into it. The `syncio-hidden` tag on 79% of products is Syncio marking its own source catalogue, not evidence of inbound writes |
+  | The legacy C# syncs (`UnlShopSkuSync`, `UnlShopProductLevelSync`) | no image or media handling in the code at all |
+
+  The likeliest remaining explanation is **photographs being uploaded into Shopify by hand**: the
+  filenames are exactly the ones the team uses in Unleashed, and at least one (`9KDR650Y-1SIZEO12.png`)
+  was for a SKU that does not exist in Unleashed at all, which no Unleashed-driven job could produce.
+  If so the remedy is a process one — put photos into Unleashed only and let this service place them.
+
+  > Shopify logs **no event** and exposes **no creator field** for file uploads — not even for this
+  > service's own — so a writer cannot be identified from the API. Timing is not evidence either:
+  > this service's backfills are bursty and look every bit as "human" as a person clicking upload.
+  > Attribution needs someone who knows the team's workflow, not more querying.
 - **Duplicates already in Shopify are not repaired by the sync itself.** Content adoption stops new
   ones; the copies added before it existed are cleared with `--duplicates --apply`.
 - **Two Unleashed images of one product that are byte-identical still both upload.** Deduplication

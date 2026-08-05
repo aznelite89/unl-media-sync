@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-08-05 (later)
+
+### Added
+- Duplicate surveillance in the daily verification report. `syncUnleashedProduct` already fetches a product's media and ownership state, so `findDuplicateGroups` runs on data it is already holding — no extra API call. The count, the products, and both filenames of each duplicated picture ride in the existing email, with `image-sync-duplicates.csv` attached. Seeing `9c5255af-….png` beside `9KDR704YSIZEM_1.png` makes a second writer self-evident without opening Shopify.
+- `weeklyDuplicateAudit` — Monday 09:00 AEST whole-store census, deliberately its own function rather than part of `weeklyAudit`. `host.json` caps an invocation at 10 minutes, that audit already spends a couple, and a sweep killed by the host sends NO email — the exact silent failure this watch exists to prevent.
+- `auditDuplicates` now stops on its own `DUPLICATE_SCAN_BUDGET_MS` (7 min) and survives a mid-sweep throttle, reporting a partial result flagged as a lower bound instead of losing every finding to one thrown page.
+- `summariseDuplicateGroups` and `isForeignDuplicate`, shared by both reports so their arithmetic cannot drift apart. `src/utils/state.js` holds `parseState`/`buildState`, which is what lets the sync use the duplicate scanner without the two importing each other.
+
+### Changed
+- Only **foreign** duplicates — a copy no state entry owns — move the daily verdict, and it is WARN, never ALERT. A product whose Unleashed images include two byte-identical files uploads both, producing a duplicate on every run forever; warning daily on that self-inflicted steady state is how a report earns an inbox filter. Those are still counted and listed.
+- The daily duplicate count is stated as a floor over the products checked, never as a store-wide total: a second writer can touch products Unleashed has not changed, which the daily pass never visits. Without that wording the weekly census reporting a larger number would read as a bug.
+- Duplicate findings are carried separately from `details`, which drops `unchanged` results — and a duplicate almost always sits on a product whose images are otherwise correct, so riding on `details` would have discarded most of them.
+- Duplicate findings are keyed by Shopify product id, so sibling Unleashed codes resolving to one product (18K101-3, -4, -5 …) report their shared duplicate once rather than once per code.
+- `DUPLICATE_SCAN_MEDIA_SIZE` 50 → 20. Four times the page cap, and the sweep is throttle-bound, so this roughly halves its wall-clock.
+
+### Notes
+- Verified live: the daily incremental pass found exactly the same 3 products / 5 pictures / 6 wasted slots as the full-store sweep. One of them, 9KDR715YSIZEM, is already `capped` — its duplicates have consumed the 5-image page cap and are blocking a real image.
+
 ## 2026-08-05
 
 ### Fixed
@@ -16,7 +34,7 @@
 ### Notes
 - Backlog cleared, 2026-08-05. Across 3,375 products, 613 carried a duplicated picture — 60 a hand-uploaded copy alongside one this sync added, 571 sibling codes duplicating one photograph. All 1,197 wasted image slots were detached in one `--apply` run with no failures, and a re-scan reports zero duplicates remaining. 9KDP663-1 went from 4 images to 3, and the 9KBELY040* belcher from 5 identical images to 1. Dry runs confirm the affected codes re-adopt the surviving copy by content rather than re-uploading.
 - The `UnlShopSync` custom app was granted `read_files` and `write_files`, which `fileUpdate` needs. Adding scopes to an installed legacy custom app did NOT rotate the Admin API token, so no credential update was required. Note the store also has a similarly named `Unleashed Sync` app that this service does not use.
-- **Duplicates started reappearing within minutes of the cleanup — the second writer is Syncio, not Unleashed.** `Syncio Multi Store Sync` mirrors products into this store from another Shopify store, bringing their images under the source store's SKU-based filenames (`9KDR704YSIZEM_1.png`) while this service uploads the same pictures from Unleashed under GUID filenames. 2,656 of 3,375 products (79%) carry a `syncio-hidden` tag, and all three products that duplicated again within 25 minutes of the cleanup are Syncio-managed, each updated within seconds of the duplicate file appearing. Unleashed's own connector is NOT responsible: its `Default Image → Product Image` toggle is off, and it only ever covered a single default image, never the numbered `_1`/`_2` files seen here. Note Shopify logs no event and exposes no creator field for file uploads, so this was established from Syncio's product tags and update timestamps rather than direct attribution.
+- **Duplicates started reappearing within minutes of the cleanup — a second writer is active, and it has NOT been identified.** Byte-identical copies of Unleashed photographs keep appearing under their human filenames (`9KDR704YSIZEM_1.png`) beside the GUID-named copies this service uploads, owned by no state entry. Ruled out: Unleashed's own connector (image toggle off, and it only ever did the single default image, never numbered `_1`/`_2` files); `Syncio Multi Store Sync` (`for-discovery` is a **Source-only** store in Syncio — it pushes out to Speirs Jewellers and Quarter Carat and is not a destination, so Syncio never writes into it; the `syncio-hidden` tag on 79% of products marks its own source catalogue); and the legacy C# syncs (no image handling in the code). The likeliest remaining explanation is photographs uploaded into Shopify by hand — the filenames are exactly the ones the team uses in Unleashed, and `9KDR650Y-1SIZEO12.png` was uploaded for a SKU that does not exist in Unleashed at all. Shopify logs no event and exposes no creator field for file uploads, not even for this service's own, so this cannot be settled from the API; it needs someone who knows the team's workflow.
 
 ### Changed
 - `--duplicates --apply` now stops on the first `ACCESS_DENIED` instead of retrying every remaining product. A missing scope is a property of the token, not of the product, so the first run printed the same error 613 times and buried the one line that mattered. It now reports which scope is missing and that nothing was changed.

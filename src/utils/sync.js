@@ -2,34 +2,16 @@ import {
   ADOPTED_ORIGINS,
   MEDIA_ORIGIN,
   MEDIA_STATUS,
-  STATE_VERSION,
   SYNC_OUTCOME,
 } from '../constants/index.js';
+import { findDuplicateGroups, planDuplicateCleanup } from './duplicates.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from './imageIdentity.js';
 import { fingerprintImages, isSameContent, shopifyFingerprint } from './imageFingerprint.js';
+import { buildState, parseState } from './state.js';
 
-/**
- * Reads the state this service wrote on a previous run. Anything malformed is
- * treated as "no state" — the reconciler can always rebuild it by adoption.
- *
- * @param {{ value?: string } | null} metafield
- */
-export function parseState(metafield) {
-  const empty = { version: STATE_VERSION, managed: [], syncedAt: null };
-  if (!metafield?.value) return empty;
-
-  try {
-    const parsed = JSON.parse(metafield.value);
-    if (!Array.isArray(parsed?.managed)) return empty;
-    return {
-      version: parsed.version ?? STATE_VERSION,
-      syncedAt: parsed.syncedAt ?? null,
-      managed: parsed.managed.filter((entry) => entry?.url && entry?.mediaId),
-    };
-  } catch {
-    return empty;
-  }
-}
+// Re-exported so callers that think of these as part of the sync surface — the
+// tests and the CLI among them — do not need to know where they moved to.
+export { buildState, parseState };
 
 /**
  * Works out, without calling Shopify, what should happen to a product's media.
@@ -241,6 +223,8 @@ export async function syncUnleashedProduct({
     adopted: [],
     /** Subset of `adopted` recognised by bytes rather than by filename. */
     adoptedByContent: [],
+    /** Pictures found more than once on this product. Reported, never acted on. */
+    duplicates: null,
     detached: [],
     reordered: false,
     notes: [],
@@ -285,6 +269,33 @@ export async function syncUnleashedProduct({
 
   const product = await shopify.getProduct(shopifyProductId);
   const state = parseState(product.stateMetafield);
+
+  // Free surveillance. The media and the ownership state are already in hand, so
+  // spotting a second writer's copy of a picture costs nothing extra.
+  //
+  // Snapshotted BEFORE anything is written, so it describes what was on the page
+  // when we looked. Reported only, never acted on: removal stays behind
+  // `--duplicates --apply`. Repairing here would fight a live second writer in a
+  // loop — detach, it re-adds, forever — on a customer-facing product.
+  //
+  // Shaped exactly like one element of `auditDuplicates().products` so the daily
+  // and weekly reports share `buildDuplicateCsv`.
+  const duplicateGroups = findDuplicateGroups({ media: product.media, state });
+  if (duplicateGroups.length > 0) {
+    result.duplicates = {
+      productId: shopifyProductId,
+      title: product.title ?? '',
+      mediaCount: product.media.length,
+      groups: duplicateGroups,
+      removals: planDuplicateCleanup(duplicateGroups),
+    };
+    const wasted = duplicateGroups.reduce((total, g) => total + g.copies.length - 1, 0);
+    result.notes.push(
+      `${duplicateGroups.length} picture(s) appear more than once on this product ` +
+        `(${wasted} wasted image slot(s))`,
+    );
+  }
+
   const planInput = {
     desired,
     liveMedia: product.media,
@@ -521,32 +532,3 @@ export function orderAlreadyCorrect(currentIds, desiredIds) {
   return desiredIds.every((id, index) => currentIds[index] === id);
 }
 
-/**
- * Rewrites this product code's entries while preserving those belonging to
- * sibling Unleashed products that share the same Shopify product. Dropping the
- * siblings would make their images look unowned and, with deletion enabled,
- * expose them to being detached.
- *
- * @param {{ productCode: string, entries: object[], previousManaged?: object[], liveMediaIds?: Set<string> }} input
- */
-export function buildState({ productCode, entries, previousManaged = [], liveMediaIds }) {
-  const foreign = previousManaged.filter(
-    (entry) =>
-      entry.productCode !== productCode && (!liveMediaIds || liveMediaIds.has(entry.mediaId)),
-  );
-
-  return {
-    version: STATE_VERSION,
-    syncedAt: new Date().toISOString(),
-    managed: [
-      ...foreign,
-      ...entries.map((entry) => ({
-        url: entry.url,
-        mediaId: entry.mediaId,
-        origin: entry.origin,
-        isDefault: entry.isDefault === true,
-        productCode,
-      })),
-    ],
-  };
-}

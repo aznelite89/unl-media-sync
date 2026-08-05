@@ -1,4 +1,5 @@
 import { SYNC_OUTCOME } from '../constants/index.js';
+import { summariseDuplicateGroups } from './duplicates.js';
 import { summarise } from './logger.js';
 import { syncUnleashedProduct } from './sync.js';
 
@@ -104,6 +105,50 @@ export async function reconcile({
   return finish({ results, scanned, sinceIso, truncated: false, lastPage });
 }
 
+/**
+ * Duplicated pictures seen during the run, each counted once.
+ *
+ * Several Unleashed product codes routinely resolve to ONE Shopify product
+ * (18K101-3, -4, -5 … all being sizes of one ring), and each is visited
+ * separately against the same page and the same metafield. Keying on the Shopify
+ * product id collapses those back to a single finding — otherwise a five-variant
+ * chain would report its one duplicate five times.
+ *
+ * Last observation wins: on a live pass a later sibling looked more recently.
+ *
+ * @param {object[]} results
+ */
+function collectDuplicates(results) {
+  const byProduct = new Map();
+  for (const result of results) {
+    if (!result.duplicates) continue;
+    byProduct.set(result.duplicates.productId, {
+      ...result.duplicates,
+      productCode: result.productCode ?? null,
+    });
+  }
+
+  const products = [...byProduct.values()].sort(
+    (a, b) =>
+      b.groups.reduce((n, g) => n + g.copies.length - 1, 0) -
+      a.groups.reduce((n, g) => n + g.copies.length - 1, 0),
+  );
+
+  return { ...summariseDuplicateGroups(products), products };
+}
+
+/**
+ * Products whose media was actually fetched — the honest denominator for a
+ * duplicate count. `unmatched` and `ambiguous` return before `getProduct`, and
+ * products with no Unleashed images never reach the sync at all.
+ *
+ * @param {object[]} results
+ */
+function countChecked(results) {
+  const unchecked = [SYNC_OUTCOME.UNMATCHED, SYNC_OUTCOME.AMBIGUOUS, SYNC_OUTCOME.NO_IMAGES];
+  return results.filter((result) => !unchecked.includes(result.outcome)).length;
+}
+
 function finish({ results, scanned, sinceIso, truncated, lastPage }) {
   const morePages = lastPage && lastPage.pageNumber < lastPage.totalPages;
   return {
@@ -116,6 +161,11 @@ function finish({ results, scanned, sinceIso, truncated, lastPage }) {
     /** Where to resume; null when the catalogue is exhausted. */
     nextStartPage: morePages ? lastPage.pageNumber + 1 : null,
     byOutcome: summarise(results),
+    /**
+     * Carried separately from `details` on purpose: a duplicate usually sits on a
+     * product whose outcome is `unchanged`, and `details` drops those as noise.
+     */
+    duplicates: { ...collectDuplicates(results), productsChecked: countChecked(results) },
     /** Only the interesting ones — unchanged products are the bulk and are noise. */
     details: results.filter((result) => result.outcome !== SYNC_OUTCOME.UNCHANGED),
   };
