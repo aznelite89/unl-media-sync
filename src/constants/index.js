@@ -67,9 +67,21 @@ export const STATE_VERSION = 1;
 export const MEDIA_ORIGIN = {
   /** Uploaded by this service. */
   SYNCED: 'synced',
-  /** Pre-existing Shopify media recognised as the same Unleashed file. */
+  /** Pre-existing Shopify media recognised as the same Unleashed file by NAME. */
   ADOPTED: 'adopted',
+  /**
+   * Pre-existing Shopify media recognised as the same picture by its BYTES.
+   *
+   * Kept distinct from `adopted` because it means something different: the file
+   * reached Shopify by a route that did not preserve the Unleashed filename —
+   * in practice, a person uploading the photo by hand — so only the content
+   * could identify it. Reports can then show how often that is happening.
+   */
+  ADOPTED_BY_CONTENT: 'adopted_by_content',
 };
+
+/** Every origin that means "already on the page; this service did not add it". */
+export const ADOPTED_ORIGINS = [MEDIA_ORIGIN.ADOPTED, MEDIA_ORIGIN.ADOPTED_BY_CONTENT];
 
 export const SYNC_OUTCOME = {
   /** Media was added, detached or reordered. */
@@ -214,6 +226,19 @@ export const HTTP_STATUS = {
 /** Shopify returns this in `extensions.errors` / userErrors when cost-limited. */
 export const SHOPIFY_THROTTLED_CODE = 'THROTTLED';
 
+/**
+ * Shopify's code for a missing access scope. Worth recognising by name: it is
+ * a property of the token, identical for every product, so a bulk run must stop
+ * on the first one instead of repeating the same error once per product.
+ */
+export const SHOPIFY_ACCESS_DENIED_CODE = 'ACCESS_DENIED';
+
+/**
+ * Detaching media from a product is `fileUpdate`, which needs `write_files` —
+ * NOT covered by the `write_products` the sync uses for everything else.
+ */
+export const SHOPIFY_DETACH_SCOPE = 'write_files';
+
 export const RETRY = {
   MAX_ATTEMPTS: 4,
   BASE_DELAY_MS: 750,
@@ -244,3 +269,50 @@ export const MEDIA_PAGE_SIZE = 100;
 
 /** Guard against a runaway reconcile run. */
 export const RECONCILE_MAX_PAGES = 25;
+
+/**
+ * Bytes read from the head of an Unleashed image to fingerprint it.
+ *
+ * Enough to cover a PNG's IHDR (byte 16) and a JPEG's frame header even behind a
+ * long EXIF block, while the `Content-Range` on the reply carries the file's
+ * total size. So one 4 KB request yields both halves of the fingerprint without
+ * ever downloading the picture.
+ */
+export const IMAGE_PROBE_BYTES = 4096;
+
+/** `206 Partial Content` — a range request the CDN honoured. */
+export const HTTP_PARTIAL_CONTENT = 206;
+
+/**
+ * Why two Shopify media items on one product hold the same picture, which
+ * decides whether anything can safely be done about it.
+ */
+export const DUPLICATE_KIND = {
+  /**
+   * One copy this service owns, one it does not. The unowned copy was almost
+   * always uploaded by hand before the same photo reached Unleashed. Safe to
+   * repair: drop the copy this service added and let it re-adopt the other.
+   */
+  MIXED: 'mixed',
+  /**
+   * Every copy was added by hand. Nothing to do here — this sync has never
+   * touched them and must not start now.
+   */
+  ALL_UNMANAGED: 'all_unmanaged',
+  /**
+   * Every copy is owned, by sibling Unleashed product codes that each hold their
+   * own copy of one photograph — variants of one product, photographed once.
+   * Safe to repair now that adoption matches on content: the codes that lose
+   * their copy re-adopt the one that remains instead of uploading again.
+   */
+  ALL_MANAGED: 'all_managed',
+};
+
+/** Products per page when scanning the store for duplicate media. */
+export const DUPLICATE_SCAN_PAGE_SIZE = 50;
+
+/** Media inspected per product during that scan; the page cap is far below this. */
+export const DUPLICATE_SCAN_MEDIA_SIZE = 50;
+
+/** Guard against a runaway duplicate scan. */
+export const DUPLICATE_SCAN_MAX_PAGES = 200;

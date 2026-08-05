@@ -1,4 +1,7 @@
 import {
+  DUPLICATE_SCAN_MAX_PAGES,
+  DUPLICATE_SCAN_MEDIA_SIZE,
+  DUPLICATE_SCAN_PAGE_SIZE,
   MEDIA_CONTENT_TYPE,
   MEDIA_PAGE_SIZE,
   RETRY,
@@ -49,6 +52,26 @@ const ALL_VARIANT_SKUS = /* GraphQL */ `
   }
 `;
 
+/**
+ * `originalSource.fileSize` and `image.width/height` are what let the sync tell
+ * that a hand-uploaded image IS one of Unleashed's, when the filenames cannot.
+ * They are free here — no extra request, no image ever downloaded.
+ */
+const MEDIA_IMAGE_FIELDS = /* GraphQL */ `
+  ... on MediaImage {
+    mimeType
+    originalSource {
+      fileSize
+    }
+    image {
+      url
+      width
+      height
+      thumbhash
+    }
+  }
+`;
+
 const PRODUCT_MEDIA = /* GraphQL */ `
   query ProductMedia($id: ID!, $first: Int!) {
     product(id: $id) {
@@ -65,17 +88,45 @@ const PRODUCT_MEDIA = /* GraphQL */ `
             details
             message
           }
-          ... on MediaImage {
-            image {
-              url
-            }
-          }
+          ${MEDIA_IMAGE_FIELDS}
         }
       }
       metafield(namespace: "${STATE_METAFIELD.NAMESPACE}", key: "${STATE_METAFIELD.KEY}") {
         id
         value
         type
+      }
+    }
+  }
+`;
+
+/**
+ * Every product's media plus its sync state, for the store-wide duplicate scan.
+ * Paged rather than fetched per product: asking product by product would be
+ * thousands of requests for a question that is one sweep.
+ */
+const ALL_PRODUCT_MEDIA = /* GraphQL */ `
+  query AllProductMedia($first: Int!, $after: String, $media: Int!) {
+    products(first: $first, after: $after) {
+      nodes {
+        id
+        title
+        media(first: $media) {
+          nodes {
+            id
+            status
+            ${MEDIA_IMAGE_FIELDS}
+          }
+        }
+        metafield(namespace: "${STATE_METAFIELD.NAMESPACE}", key: "${STATE_METAFIELD.KEY}") {
+          id
+          value
+          type
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
   }
@@ -311,6 +362,43 @@ export function createShopifyClient(config, log = console) {
   }
 
   /**
+   * Yields every product in the store with its media and sync state, one page at
+   * a time so a large catalogue never has to be held in memory at once.
+   *
+   * @param {{ pageSize?: number, mediaPageSize?: number, maxPages?: number }} [options]
+   */
+  async function* iterateProductsWithMedia({
+    pageSize = DUPLICATE_SCAN_PAGE_SIZE,
+    mediaPageSize = DUPLICATE_SCAN_MEDIA_SIZE,
+    maxPages = DUPLICATE_SCAN_MAX_PAGES,
+  } = {}) {
+    let after = null;
+    let pages = 0;
+
+    for (;;) {
+      const data = await graphql(
+        ALL_PRODUCT_MEDIA,
+        { first: pageSize, after, media: mediaPageSize },
+        { label: 'iterateProductsWithMedia' },
+      );
+
+      const connection = data?.products;
+      yield { products: connection?.nodes ?? [], pageNumber: pages + 1 };
+
+      pages += 1;
+      if (!connection?.pageInfo?.hasNextPage) return;
+      if (pages >= maxPages) {
+        log.warn?.(
+          `iterateProductsWithMedia: stopped at ${pages} pages — the scan is incomplete, ` +
+            'raise DUPLICATE_SCAN_MAX_PAGES.',
+        );
+        return;
+      }
+      after = connection.pageInfo.endCursor;
+    }
+  }
+
+  /**
    * @param {string} productId
    * @returns {Promise<{ id: string, title: string, media: object[], stateMetafield: object | null }>}
    */
@@ -430,6 +518,7 @@ export function createShopifyClient(config, log = console) {
     graphql,
     findProductsBySku,
     listAllVariantSkus,
+    iterateProductsWithMedia,
     getProduct,
     appendImage,
     detachMedia,

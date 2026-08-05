@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-05
+
+### Fixed
+- The sync no longer uploads a second copy of a picture already on the Shopify product under a different filename. Image identity was filename-only, and Unleashed's API returns just a GUID URL — never the human filename shown in its UI — so any photo someone had already uploaded to Shopify by hand looked like a new image. Reported on 9KDP663-1: three images in Unleashed, four in the shop. Replayed against live data, the run that created it now ends with three images instead of four.
+- Variants sharing one photograph no longer show it once per Unleashed product code. Alloy and size are Shopify variant options, so several codes map to one product, and each held its own copy of the same file under its own GUID — on 9KBELY040* that was five codes each adding the identical 127,626-byte image, one picture filling the whole five-image page. Adoption now claims a sibling code's copy instead of adding another. Replayed against live data, the family goes from 4 uploads and 5 images to 0 uploads and 1 image.
+- A product code that drops an image can no longer detach media a sibling code still points at. Sharing one media item between codes is new, and without the guard one variant losing interest would take the photograph off the page for every other variant using it.
+
+### Added
+- Content-based image identity in `imageFingerprint.js`. Shopify's media query already returns `originalSource.fileSize`, `image.width/height` and `thumbhash`, so the Shopify side costs no extra request; the Unleashed side is one 4 KB ranged GET whose `Content-Range` carries the file size and whose body carries the dimensions. No image is ever downloaded.
+- Adoption by content: an untracked Unleashed image whose bytes and dimensions match media already on the page — whether uploaded by hand or placed by a sibling product code — is adopted rather than uploaded. Recorded as `adopted_by_content` and persisted to state, so it costs one probe once and nothing thereafter.
+- `node scripts/sync-cli.js --duplicates [--csv path] [--apply]` — scans the store for the same picture appearing more than once on one product. Read-only unless `--apply`. It only ever detaches copies this sync owns, always leaves one copy in place, and never touches media added by hand. Detaching removes the reference; the file stays in Shopify's library.
+- `MEDIA_ORIGIN.ADOPTED_BY_CONTENT`, `ADOPTED_ORIGINS`, `DUPLICATE_KIND` and the duplicate-scan paging constants.
+- `iterateProductsWithMedia` on the Shopify client, and `buildDuplicateCsv` / `buildDuplicateSummary` on the reporter.
+### Notes
+- Backlog cleared, 2026-08-05. Across 3,375 products, 613 carried a duplicated picture — 60 a hand-uploaded copy alongside one this sync added, 571 sibling codes duplicating one photograph. All 1,197 wasted image slots were detached in one `--apply` run with no failures, and a re-scan reports zero duplicates remaining. 9KDP663-1 went from 4 images to 3, and the 9KBELY040* belcher from 5 identical images to 1. Dry runs confirm the affected codes re-adopt the surviving copy by content rather than re-uploading.
+- The `UnlShopSync` custom app was granted `read_files` and `write_files`, which `fileUpdate` needs. Adding scopes to an installed legacy custom app did NOT rotate the Admin API token, so no credential update was required. Note the store also has a similarly named `Unleashed Sync` app that this service does not use.
+
+### Changed
+- `--duplicates --apply` now stops on the first `ACCESS_DENIED` instead of retrying every remaining product. A missing scope is a property of the token, not of the product, so the first run printed the same error 613 times and buried the one line that mattered. It now reports which scope is missing and that nothing was changed.
+- `syncUnleashedProduct` takes an injectable `fetchImpl`, so the one call that does not go through the Shopify client is testable like the rest.
+- The fingerprint pass runs only when it can change the answer — an upload is pending AND the page holds measurable media this sync does not own. A fingerprint that cannot be taken falls back to uploading, so an unreachable CDN never costs a product its images.
+
 ## 2026-08-04
 
 ### Added

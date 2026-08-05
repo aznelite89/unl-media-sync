@@ -1,10 +1,12 @@
 import {
+  ADOPTED_ORIGINS,
   MEDIA_ORIGIN,
   MEDIA_STATUS,
   STATE_VERSION,
   SYNC_OUTCOME,
 } from '../constants/index.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from './imageIdentity.js';
+import { fingerprintImages, isSameContent, shopifyFingerprint } from './imageFingerprint.js';
 
 /**
  * Reads the state this service wrote on a previous run. Anything malformed is
@@ -37,8 +39,14 @@ export function parseState(metafield) {
  *  2. An untracked image that matches existing Shopify media by filename is
  *     ADOPTED. This is what stops the first run duplicating the single image
  *     Unleashed's built-in connector already pushed.
- *  3. Anything left is uploaded.
- *  4. Media this service does not own is never removed, reordered away, or
+ *  3. An untracked image whose BYTES match media already on the page is adopted
+ *     too. Filenames cannot reach this case: Unleashed's API exposes only a GUID
+ *     URL, so neither a photo someone uploaded by hand (which keeps its human
+ *     filename) nor a sibling code's copy of the same photograph (which has its
+ *     own GUID) can ever be matched by name. Requires `fingerprints`; see
+ *     imageFingerprint.js.
+ *  4. Anything left is uploaded.
+ *  5. Media this service does not own is never removed, reordered away, or
  *     otherwise touched.
  *
  * MANY-TO-ONE: several Unleashed products routinely map to one Shopify product,
@@ -50,12 +58,19 @@ export function parseState(metafield) {
  * Without that split, syncing -4 would detach -3's image and the two would
  * destroy each other's images on alternate runs.
  *
+ * Those siblings usually hold the SAME photograph, each under its own Unleashed
+ * GUID, so name matching saw a page of different images and every code added its
+ * own copy — five identical pictures filling a five-image page on 9KBELY040*.
+ * Content matching is what collapses them to one. The consequence is that one
+ * media item can now be referenced by several codes' entries, which is why
+ * `toDetach` also skips anything a sibling still points at.
+ *
  * PAGE CAP: `maxMediaPerProduct` limits the TOTAL images on the Shopify product,
  * counting media the sync did not add. Uploads beyond the cap are skipped and
  * reported — nothing is ever removed to make room. Because `desired` is ordered
  * default-image-first, the image that survives the cut is the default one.
  *
- * @param {{ desired: Array<{url: string, isDefault: boolean}>, liveMedia: object[], state: object, productCode: string, maxMediaPerProduct?: number }} input
+ * @param {{ desired: Array<{url: string, isDefault: boolean}>, liveMedia: object[], state: object, productCode: string, maxMediaPerProduct?: number, fingerprints?: Map<string, object> }} input
  */
 export function planMediaChanges({
   desired,
@@ -63,6 +78,7 @@ export function planMediaChanges({
   state,
   productCode,
   maxMediaPerProduct = Number.POSITIVE_INFINITY,
+  fingerprints = new Map(),
 }) {
   const liveById = new Map(liveMedia.map((media) => [media.id, media]));
 
@@ -71,6 +87,15 @@ export function planMediaChanges({
   const trackedByKey = new Map(tracked.map((entry) => [imageKey(entry.url), entry]));
   const managedIds = new Set(tracked.map((entry) => entry.mediaId));
   const ownedByThisCode = tracked.filter((entry) => entry.productCode === productCode);
+  const ownedIdsByThisCode = new Set(ownedByThisCode.map((entry) => entry.mediaId));
+
+  /**
+   * Media this product code does not already own, and so may claim: added by
+   * hand, or placed by a sibling code. Claiming a sibling's copy is the whole
+   * point of content matching here — variants that share one photograph must
+   * show it once, not once per Unleashed code.
+   */
+  const contentCandidates = liveMedia.filter((media) => !ownedIdsByThisCode.has(media.id));
 
   const claimed = new Set();
   const resolved = [];
@@ -92,18 +117,34 @@ export function planMediaChanges({
       continue;
     }
 
-    const adoptable = liveMedia.find(
-      (media) =>
-        !claimed.has(media.id) &&
-        !managedIds.has(media.id) &&
-        isSameImage(media.image?.url, image.url),
+    // Only media nobody has spoken for yet.
+    const available = (media) => !claimed.has(media.id);
+
+    // Filename first: free, and what connector-pushed media matches on.
+    let adoptable = contentCandidates.find(
+      (media) => available(media) && isSameImage(media.image?.url, image.url),
     );
+    let origin = MEDIA_ORIGIN.ADOPTED;
+
+    // Then the bytes — the only thing that can recognise a copy uploaded by hand
+    // under a human filename, or a sibling code's copy of the same photograph
+    // sitting under a different Unleashed GUID.
+    if (!adoptable) {
+      const wanted = fingerprints.get(key);
+      if (wanted) {
+        adoptable = contentCandidates.find(
+          (media) => available(media) && isSameContent(wanted, shopifyFingerprint(media)),
+        );
+        origin = MEDIA_ORIGIN.ADOPTED_BY_CONTENT;
+      }
+    }
+
     if (adoptable) {
       claimed.add(adoptable.id);
       resolved.push({
         url: image.url,
         mediaId: adoptable.id,
-        origin: MEDIA_ORIGIN.ADOPTED,
+        origin,
         isDefault: image.isDefault,
         media: adoptable,
       });
@@ -116,7 +157,24 @@ export function planMediaChanges({
   // Only ever removable: media THIS product code put here that Unleashed dropped.
   // Entries owned by sibling product codes are deliberately excluded.
   const desiredKeys = new Set(desired.map((image) => imageKey(image.url)));
-  const toDetach = ownedByThisCode.filter((entry) => !desiredKeys.has(imageKey(entry.url)));
+
+  /**
+   * Media a sibling code also has a state entry for. Once codes can share one
+   * media item — which is exactly what content adoption across siblings
+   * produces — "this code no longer wants it" stops meaning "nobody wants it",
+   * and detaching on one code's behalf would take the photograph off the page
+   * for every other code still using it.
+   */
+  const sharedWithOtherCodes = new Set(
+    tracked.filter((entry) => entry.productCode !== productCode).map((entry) => entry.mediaId),
+  );
+
+  const toDetach = ownedByThisCode.filter(
+    (entry) =>
+      !desiredKeys.has(imageKey(entry.url)) &&
+      !claimed.has(entry.mediaId) &&
+      !sharedWithOtherCodes.has(entry.mediaId),
+  );
 
   const unmanagedMedia = liveMedia.filter(
     (media) => !managedIds.has(media.id) && !claimed.has(media.id),
@@ -142,6 +200,7 @@ export function planMediaChanges({
     mediaOnPage: liveMedia.length,
     toDetach,
     unmanagedMedia,
+    contentCandidates,
     siblingManaged,
     failedMedia,
     managedIds,
@@ -156,9 +215,19 @@ export function planMediaChanges({
  *   shopify: import('./shopify.js').createShopifyClient extends (...a: any) => infer R ? R : never,
  *   config: object,
  *   log?: { info?: Function, warn?: Function, error?: Function },
+ *   fetchImpl?: Function,
  * }} input
  */
-export async function syncUnleashedProduct({ unleashedProduct, shopify, config, log = console }) {
+export async function syncUnleashedProduct({
+  unleashedProduct,
+  shopify,
+  config,
+  log = console,
+  // Every other call this function makes goes through the injected Shopify
+  // client; fingerprinting reads Unleashed's CDN directly, so it comes in the
+  // same way rather than reaching for a global.
+  fetchImpl = fetch,
+}) {
   const productCode = String(unleashedProduct?.ProductCode ?? '').trim();
   const result = {
     productCode,
@@ -170,6 +239,8 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
     outcome: SYNC_OUTCOME.FAILED,
     added: [],
     adopted: [],
+    /** Subset of `adopted` recognised by bytes rather than by filename. */
+    adoptedByContent: [],
     detached: [],
     reordered: false,
     notes: [],
@@ -214,13 +285,43 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
 
   const product = await shopify.getProduct(shopifyProductId);
   const state = parseState(product.stateMetafield);
-  const plan = planMediaChanges({
+  const planInput = {
     desired,
     liveMedia: product.media,
     state,
     productCode,
     maxMediaPerProduct: config.maxMediaPerProduct,
-  });
+  };
+  let plan = planMediaChanges(planInput);
+
+  // Second pass, only when it can change the answer: we are about to upload, and
+  // the page holds media this code does not own that could already BE one of
+  // these pictures under a name filename matching can never recognise. Costs one
+  // small ranged request per image that would otherwise be uploaded, and nothing
+  // at all once the adoption is written to state.
+  if (
+    plan.toUpload.length > 0 &&
+    plan.contentCandidates.some((media) => shopifyFingerprint(media) !== null)
+  ) {
+    const fingerprints = await fingerprintImages(plan.toUpload, { log, fetchImpl });
+    if (fingerprints.size > 0) plan = planMediaChanges({ ...planInput, fingerprints });
+  }
+
+  const adoptedByContent = plan.resolved.filter(
+    (entry) => entry.origin === MEDIA_ORIGIN.ADOPTED_BY_CONTENT,
+  );
+  if (adoptedByContent.length > 0) {
+    result.adoptedByContent = adoptedByContent.map((entry) => entry.mediaId);
+    result.notes.push(
+      `${adoptedByContent.length} image(s) were already on this product under a different ` +
+        'filename; adopted instead of uploading a duplicate',
+    );
+    log.info?.(
+      `${productCode}: adopted ${adoptedByContent.length} existing image(s) on ${shopifyProductId} ` +
+        'by content — a duplicate upload was avoided',
+    );
+  }
+
   const liveMediaIdsBefore = new Set(product.media.map((media) => media.id));
   result.mediaOnPage = plan.mediaOnPage;
 
@@ -285,7 +386,7 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
     result.outcome =
       plan.skippedForCap.length > 0 ? SYNC_OUTCOME.CAPPED : SYNC_OUTCOME.UNCHANGED;
     result.adopted = plan.resolved
-      .filter((entry) => entry.origin === MEDIA_ORIGIN.ADOPTED)
+      .filter((entry) => ADOPTED_ORIGINS.includes(entry.origin))
       .map((entry) => entry.mediaId);
 
     // Adoption is itself worth persisting so later runs skip the lookup.
@@ -307,7 +408,7 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
     result.outcome = SYNC_OUTCOME.DRY_RUN;
     result.notes.push(
       `would upload ${plan.toUpload.length}, detach ${willDetach.length}, ` +
-        `adopt ${plan.resolved.filter((entry) => entry.origin === MEDIA_ORIGIN.ADOPTED).length}, ` +
+        `adopt ${plan.resolved.filter((entry) => ADOPTED_ORIGINS.includes(entry.origin)).length}, ` +
         `reorder: ${reorderNeededNow || (canReorder && plan.toUpload.length > 0)}`,
     );
     result.added = plan.toUpload.map((image) => ({ url: image.url, mediaId: null }));
@@ -402,7 +503,7 @@ export async function syncUnleashedProduct({ unleashedProduct, shopify, config, 
   });
 
   result.adopted = entries
-    .filter((entry) => entry.origin === MEDIA_ORIGIN.ADOPTED)
+    .filter((entry) => ADOPTED_ORIGINS.includes(entry.origin))
     .map((entry) => entry.mediaId);
   result.outcome = SYNC_OUTCOME.SYNCED;
   return result;

@@ -2,6 +2,7 @@ import {
   AUDIT_INLINE_LIMIT,
   DAILY_INLINE_LIMIT,
   DAILY_REPORTED_OUTCOMES,
+  DUPLICATE_KIND,
   EMAIL_SUBJECT_TAG,
   OUTCOME_LABEL,
   REPORT_NOTE_MAX_CHARS,
@@ -329,6 +330,101 @@ export function buildAuditCsv(audit) {
     );
   }
   return lines.join('\n');
+}
+
+/**
+ * One row per duplicated copy, so the whole picture is reviewable in a
+ * spreadsheet before anything is detached.
+ *
+ * @param {object} audit Result of `auditDuplicates`.
+ */
+export function buildDuplicateCsv(audit) {
+  const lines = [
+    'kind,shopify_product_id,title,media_id,file_name,dimensions,bytes,owner_product_code,origin,action',
+  ];
+  for (const product of audit?.products ?? []) {
+    const removing = new Set((product.removals ?? []).map((removal) => removal.mediaId));
+    for (const group of product.groups ?? []) {
+      for (const copy of group.copies) {
+        lines.push(
+          [
+            csvCell(group.kind),
+            csvCell(product.productId),
+            csvCell(product.title),
+            csvCell(copy.mediaId),
+            csvCell(copy.filename),
+            csvCell(copy.dimensions),
+            csvCell(copy.bytes),
+            csvCell(copy.productCode ?? ''),
+            csvCell(copy.origin ?? 'added by hand in Shopify'),
+            csvCell(removing.has(copy.mediaId) ? 'detach' : 'keep'),
+          ].join(','),
+        );
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Plain-text summary of a duplicate scan for the CLI.
+ *
+ * @param {{ audit: object, applied?: boolean }} input
+ */
+export function buildDuplicateSummary({ audit, applied = false }) {
+  const byKind = audit?.byKind ?? {};
+  const title = 'Image sync — duplicate media scan';
+  const rows = [
+    ['Products scanned', String(audit?.scanned ?? 0)],
+    ['Products with duplicates', String((audit?.products ?? []).length)],
+    ['Duplicated pictures', String(Object.values(byKind).reduce((sum, n) => sum + n, 0))],
+    ['Wasted image slots', String(audit?.wastedSlots ?? 0)],
+    ['Safe to repair', String(audit?.repairable ?? 0)],
+  ];
+  if (applied) rows.push(['Detached', String(audit?.detached ?? 0)]);
+
+  const reasons = [];
+  if (byKind[DUPLICATE_KIND.MIXED] > 0) {
+    reasons.push(
+      `${byKind[DUPLICATE_KIND.MIXED]} picture(s) exist as one hand-uploaded copy plus one this ` +
+        'sync added — the copy the sync added can be detached, and the next run re-adopts the other.',
+    );
+  }
+  if (byKind[DUPLICATE_KIND.ALL_UNMANAGED] > 0) {
+    reasons.push(
+      `${byKind[DUPLICATE_KIND.ALL_UNMANAGED]} picture(s) were uploaded by hand more than once. ` +
+        'This sync did not create them and will not remove them — tidy these in Shopify.',
+    );
+  }
+  if (byKind[DUPLICATE_KIND.ALL_MANAGED] > 0) {
+    reasons.push(
+      `${byKind[DUPLICATE_KIND.ALL_MANAGED]} picture(s) are held more than once by sibling ` +
+        'Unleashed product codes sharing one Shopify product — variants photographed once. One ' +
+        'copy is kept and the rest detached; those codes re-adopt the survivor on their next run.',
+    );
+  }
+  if (audit?.blocked) reasons.push(audit.blocked);
+  if (audit?.failures?.length) {
+    reasons.push(`${audit.failures.length} product(s) failed to update; see the log.`);
+  }
+  if (reasons.length === 0) reasons.push('No duplicated media found.');
+
+  const problems = (audit?.products ?? []).slice(0, AUDIT_INLINE_LIMIT).map((product) => ({
+    productCode: product.productId.split('/').pop(),
+    outcome: `${product.groups.length} duplicate picture(s)`,
+    note: truncate(`${product.title} — ${product.removals.length} detachable`),
+  }));
+
+  return {
+    counts: {
+      scanned: audit?.scanned ?? 0,
+      affected: (audit?.products ?? []).length,
+      wastedSlots: audit?.wastedSlots ?? 0,
+      repairable: audit?.repairable ?? 0,
+      detached: audit?.detached ?? 0,
+    },
+    text: buildText({ title, rows, reasons, problems, problemHeading: 'Affected products' }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */

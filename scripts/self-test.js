@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 
 import {
+  DUPLICATE_KIND,
   MEDIA_ORIGIN,
   MEDIA_STATUS,
   STATE_VERSION,
@@ -21,7 +22,15 @@ import {
   orderedProblemDetails,
 } from '../src/utils/report.js';
 import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
+import { findDuplicateGroups, planDuplicateCleanup } from '../src/utils/duplicates.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
+import {
+  contentKey,
+  isSameContent,
+  readImageSize,
+  shopifyFingerprint,
+  totalBytesOf,
+} from '../src/utils/imageFingerprint.js';
 import {
   buildState,
   orderAlreadyCorrect,
@@ -444,6 +453,476 @@ test('an already-correct order is not reordered again', () => {
   assert.equal(orderAlreadyCorrect(['a', 'b'], []), true);
   assert.equal(orderAlreadyCorrect(['b', 'a'], ['a', 'b']), false);
   assert.equal(orderAlreadyCorrect(['a'], ['a', 'b']), false, 'a freshly appended image needs a move');
+});
+
+// --- content identity: the same picture under two different filenames --------
+// Taken from the live duplicate that prompted this. Unleashed served the photo
+// as a GUID; someone had already uploaded the identical file to Shopify by hand
+// as "9KDP663 & 9KDP663-1_Comparison.png". Unleashed's API never exposes that
+// name, so only the bytes could connect the two.
+
+const COMPARISON_BYTES = 866082;
+const COMPARISON_THUMBHASH = 'KhgODwL42ah3h4h2iHh3eId3WANFRXAD';
+const COMPARISON_UNLEASHED =
+  'https://unlappcdn.unleashedsoftware.com/037a/9c5255af-e6c0-4627-80a4-869e3e81c78b/9c5255af-e6c0-4627-80a4-869e3e81c78b.png';
+
+const mediaNode = ({ id, filename, bytes, width = 1080, height = 1080, thumbhash = null }) => ({
+  id,
+  status: MEDIA_STATUS.READY,
+  mimeType: 'image/png',
+  originalSource: { fileSize: bytes },
+  image: {
+    url: `https://cdn.shopify.com/s/files/1/x/files/${filename}?v=1`,
+    width,
+    height,
+    thumbhash,
+  },
+});
+
+const HAND_UPLOADED = mediaNode({
+  id: 'gid://shopify/MediaImage/hand',
+  filename: '9KDP663_9KDP663-1_Comparison.png',
+  bytes: COMPARISON_BYTES,
+  thumbhash: COMPARISON_THUMBHASH,
+});
+
+const pngHeader = (width, height) => {
+  const buffer = Buffer.alloc(32);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+  buffer.write('IHDR', 12, 'latin1');
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
+};
+
+const jpegHeader = (width, height) => {
+  const buffer = Buffer.alloc(48);
+  // SOI, then an APP0 segment the walk must step over to reach the frame header.
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).copy(buffer, 0);
+  Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08]).copy(buffer, 20);
+  buffer.writeUInt16BE(height, 25);
+  buffer.writeUInt16BE(width, 27);
+  return buffer;
+};
+
+test('image dimensions are read from a PNG header alone', () => {
+  assert.deepEqual(readImageSize(pngHeader(1080, 1350)), { width: 1080, height: 1350 });
+});
+
+test('image dimensions are read from a JPEG behind a leading segment', () => {
+  assert.deepEqual(readImageSize(jpegHeader(1500, 1094)), { width: 1500, height: 1094 });
+});
+
+test('unrecognisable bytes yield no size rather than a wrong one', () => {
+  assert.equal(readImageSize(Buffer.alloc(32)), null);
+  assert.equal(readImageSize(Buffer.alloc(4)), null);
+});
+
+test('the total file size comes off the Content-Range of a ranged reply', () => {
+  const response = {
+    status: 206,
+    headers: { get: (name) => (name === 'content-range' ? 'bytes 0-4095/866082' : null) },
+  };
+  assert.equal(totalBytesOf(response, Buffer.alloc(4096)), COMPARISON_BYTES);
+});
+
+test('a CDN that ignores the range still yields a size', () => {
+  const response = { status: 200, headers: { get: () => null } };
+  assert.equal(totalBytesOf(response, Buffer.alloc(1234)), 1234);
+});
+
+test('content matching needs bytes AND both dimensions to agree', () => {
+  const base = { bytes: COMPARISON_BYTES, width: 1080, height: 1080 };
+  assert.equal(isSameContent(base, { ...base }), true);
+  assert.equal(isSameContent(base, { ...base, bytes: COMPARISON_BYTES + 1 }), false);
+  assert.equal(isSameContent(base, { ...base, width: 1254 }), false);
+  assert.equal(isSameContent(base, { ...base, height: 1350 }), false);
+});
+
+test('an unmeasurable image never matches anything', () => {
+  const base = { bytes: COMPARISON_BYTES, width: 1080, height: 1080 };
+  assert.equal(isSameContent(base, null), false);
+  assert.equal(isSameContent(null, base), false);
+  assert.equal(shopifyFingerprint({ id: 'x', image: { url: 'a.png' } }), null, 'no size, no fingerprint');
+  assert.equal(shopifyFingerprint({ originalSource: { fileSize: 10 } }), null, 'no dimensions');
+});
+
+test('a hand-uploaded copy is ADOPTED by content, not duplicated', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: COMPARISON_UNLEASHED, isDefault: false }],
+    liveMedia: [HAND_UPLOADED],
+    state: parseState(null),
+    productCode: '9KDP663-1',
+    fingerprints: new Map([
+      [imageKey(COMPARISON_UNLEASHED), { bytes: COMPARISON_BYTES, width: 1080, height: 1080 }],
+    ]),
+  });
+
+  assert.equal(plan.toUpload.length, 0, 'the picture is already on the page');
+  assert.equal(plan.resolved.length, 1);
+  assert.equal(plan.resolved[0].origin, MEDIA_ORIGIN.ADOPTED_BY_CONTENT);
+  assert.equal(plan.resolved[0].mediaId, HAND_UPLOADED.id);
+  assert.equal(plan.toDetach.length, 0);
+});
+
+test('without a fingerprint the filename mismatch still uploads — the old bug, reproduced', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: COMPARISON_UNLEASHED, isDefault: false }],
+    liveMedia: [HAND_UPLOADED],
+    state: parseState(null),
+    productCode: '9KDP663-1',
+  });
+  assert.equal(plan.toUpload.length, 1, 'filenames alone cannot connect a GUID to a human name');
+});
+
+test('a different picture of the same size is NOT adopted', () => {
+  // Whole photoshoots in this store share dimensions; only the bytes separate them.
+  const plan = planMediaChanges({
+    desired: [{ url: COMPARISON_UNLEASHED, isDefault: false }],
+    liveMedia: [
+      mediaNode({
+        id: 'gid://shopify/MediaImage/other',
+        filename: 'a-different-shot.png',
+        bytes: COMPARISON_BYTES + 4096,
+      }),
+    ],
+    state: parseState(null),
+    productCode: '9KDP663-1',
+    fingerprints: new Map([
+      [imageKey(COMPARISON_UNLEASHED), { bytes: COMPARISON_BYTES, width: 1080, height: 1080 }],
+    ]),
+  });
+  assert.equal(plan.toUpload.length, 1);
+  assert.equal(plan.resolved.length, 0);
+});
+
+// Christina, 2026-08-05, on 9KBELY04055CM: "this is an example of product
+// variants that have the same product image. We want to ensure that if the
+// products have the same hash then they do not show twice."
+//
+// Five Unleashed codes for one belcher chain, each holding the identical
+// 127626-byte file under its own GUID. Name matching saw five different images
+// and every code uploaded its own, filling the whole five-image page with one
+// picture.
+
+const BELCHER_BYTES = 127626;
+const BELCHER_CODES = [
+  '9KBELY04019CM',
+  '9KBELY04042CM',
+  '9KBELY04045CM',
+  '9KBELY04050CM',
+  '9KBELY04055CM',
+];
+const belcherUrl = (code) => `https://unlappcdn.unleashedsoftware.com/037a/guid-for-${code}.png`;
+const belcherFingerprint = (code) =>
+  new Map([[imageKey(belcherUrl(code)), { bytes: BELCHER_BYTES, width: 1080, height: 1080 }]]);
+
+const FIRST_BELCHER_MEDIA = mediaNode({
+  id: 'gid://shopify/MediaImage/belcher',
+  filename: 'guid-for-9KBELY04019CM.png',
+  bytes: BELCHER_BYTES,
+});
+const FIRST_BELCHER_STATE = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: belcherUrl(BELCHER_CODES[0]),
+      mediaId: FIRST_BELCHER_MEDIA.id,
+      origin: MEDIA_ORIGIN.SYNCED,
+      productCode: BELCHER_CODES[0],
+    },
+  ],
+};
+
+test('a sibling variant reuses the photo already on the page instead of adding its own', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: belcherUrl('9KBELY04055CM'), isDefault: true }],
+    liveMedia: [FIRST_BELCHER_MEDIA],
+    state: FIRST_BELCHER_STATE,
+    productCode: '9KBELY04055CM',
+    fingerprints: belcherFingerprint('9KBELY04055CM'),
+  });
+
+  assert.equal(plan.toUpload.length, 0, 'the picture is already on the page');
+  assert.equal(plan.resolved[0].mediaId, FIRST_BELCHER_MEDIA.id);
+  assert.equal(plan.resolved[0].origin, MEDIA_ORIGIN.ADOPTED_BY_CONTENT);
+  assert.equal(plan.toDetach.length, 0, "the owning sibling's media is never taken away");
+});
+
+test('all five belcher variants land on one media item, not five', () => {
+  const mediaIds = new Set();
+  for (const code of BELCHER_CODES.slice(1)) {
+    const plan = planMediaChanges({
+      desired: [{ url: belcherUrl(code), isDefault: true }],
+      liveMedia: [FIRST_BELCHER_MEDIA],
+      state: FIRST_BELCHER_STATE,
+      productCode: code,
+      fingerprints: belcherFingerprint(code),
+    });
+    assert.equal(plan.toUpload.length, 0, `${code} must not add a sixth copy`);
+    mediaIds.add(plan.resolved[0].mediaId);
+  }
+  assert.deepEqual([...mediaIds], [FIRST_BELCHER_MEDIA.id]);
+});
+
+test('a variant that drops its image cannot detach a photo a sibling still uses', () => {
+  // The hazard created by sharing one media item across codes: without the
+  // guard, -55CM dropping its image would pull the picture off the page for the
+  // four other variants still pointing at it.
+  const shared = {
+    version: STATE_VERSION,
+    managed: [
+      ...FIRST_BELCHER_STATE.managed,
+      {
+        url: belcherUrl('9KBELY04055CM'),
+        mediaId: FIRST_BELCHER_MEDIA.id,
+        origin: MEDIA_ORIGIN.ADOPTED_BY_CONTENT,
+        productCode: '9KBELY04055CM',
+      },
+    ],
+  };
+
+  const plan = planMediaChanges({
+    desired: [{ url: 'https://unl/a-completely-different-photo.png', isDefault: true }],
+    liveMedia: [FIRST_BELCHER_MEDIA],
+    state: shared,
+    productCode: '9KBELY04055CM',
+  });
+
+  assert.equal(plan.toDetach.length, 0, 'shared media must survive one code losing interest');
+  assert.equal(plan.toUpload.length, 1);
+});
+
+test('a variant still detaches media no sibling is using', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: 'https://unl/a-completely-different-photo.png', isDefault: true }],
+    liveMedia: [FIRST_BELCHER_MEDIA],
+    state: FIRST_BELCHER_STATE,
+    productCode: BELCHER_CODES[0],
+  });
+  assert.equal(plan.toDetach.length, 1, 'sole owner, so removal is still on the table');
+});
+
+test('end to end: the duplicate upload is avoided and the adoption is persisted', async () => {
+  let saved = null;
+  const shopify = {
+    findProductsBySku: async () => ({
+      products: [{ id: 'gid://shopify/Product/8597492629657', title: 'Diamond Cross Pendant' }],
+      variantIds: [],
+    }),
+    getProduct: async () => ({
+      id: 'gid://shopify/Product/8597492629657',
+      title: 'Diamond Cross Pendant',
+      media: [HAND_UPLOADED],
+      stateMetafield: null,
+    }),
+    appendImage: async () => assert.fail('must not upload a picture already on the page'),
+    detachMedia: async () => assert.fail('nothing should be removed'),
+    reorderMedia: async () => null,
+    saveState: async ({ state }) => {
+      saved = state;
+      return [];
+    },
+  };
+
+  const result = await syncUnleashedProduct({
+    unleashedProduct: {
+      ProductCode: '9KDP663-1',
+      Guid: 'g',
+      Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }],
+    },
+    shopify,
+    config: {
+      maxSyncedImages: 5,
+      maxMediaPerProduct: 5,
+      deleteRemovedMedia: false,
+      reorderMedia: true,
+      dryRun: false,
+    },
+    log: { info() {}, warn() {}, error() {} },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 206,
+      headers: { get: (name) => (name === 'content-range' ? `bytes 0-4095/${COMPARISON_BYTES}` : null) },
+      arrayBuffer: async () => pngHeader(1080, 1080),
+    }),
+  });
+
+  assert.equal(result.added.length, 0, 'no duplicate uploaded');
+  assert.deepEqual(result.adoptedByContent, [HAND_UPLOADED.id]);
+  assert.deepEqual(result.adopted, [HAND_UPLOADED.id]);
+  assert.ok(
+    result.notes.some((note) => note.includes('different filename')),
+    'the adoption must be explained in the report',
+  );
+  assert.equal(saved?.managed?.[0]?.mediaId, HAND_UPLOADED.id);
+  assert.equal(
+    saved?.managed?.[0]?.origin,
+    MEDIA_ORIGIN.ADOPTED_BY_CONTENT,
+    'so later runs skip the fingerprint fetch entirely',
+  );
+});
+
+test('a fingerprint that cannot be taken falls back to uploading', async () => {
+  let uploaded = 0;
+  const shopify = {
+    findProductsBySku: async () => ({
+      products: [{ id: 'gid://shopify/Product/1', title: 'P' }],
+      variantIds: [],
+    }),
+    getProduct: async () => ({
+      id: 'gid://shopify/Product/1',
+      title: 'P',
+      media: [HAND_UPLOADED],
+      stateMetafield: null,
+    }),
+    appendImage: async () => {
+      uploaded += 1;
+      return { media: { id: 'gid://shopify/MediaImage/new' }, allMedia: [] };
+    },
+    detachMedia: async () => [],
+    reorderMedia: async () => null,
+    saveState: async () => [],
+  };
+
+  const result = await syncUnleashedProduct({
+    unleashedProduct: {
+      ProductCode: 'X',
+      Guid: 'g',
+      Images: [{ Url: COMPARISON_UNLEASHED, IsDefault: true }],
+    },
+    shopify,
+    config: {
+      maxSyncedImages: 5,
+      maxMediaPerProduct: 5,
+      deleteRemovedMedia: false,
+      reorderMedia: true,
+      dryRun: false,
+    },
+    log: { info() {}, warn() {}, error() {} },
+    fetchImpl: async () => {
+      throw new Error('CDN unreachable');
+    },
+  });
+
+  assert.equal(uploaded, 1, 'an unreachable CDN must not cost the product its image');
+  assert.equal(result.outcome, SYNC_OUTCOME.SYNCED);
+});
+
+// --- duplicates already on the page ------------------------------------------
+
+const SYNC_OWNED = mediaNode({
+  id: 'gid://shopify/MediaImage/ours',
+  filename: '9c5255af-e6c0-4627-80a4-869e3e81c78b.png',
+  bytes: COMPARISON_BYTES,
+  thumbhash: COMPARISON_THUMBHASH,
+});
+
+const STATE_OWNING_OURS = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: COMPARISON_UNLEASHED,
+      mediaId: SYNC_OWNED.id,
+      origin: MEDIA_ORIGIN.SYNCED,
+      productCode: '9KDP663-1',
+    },
+  ],
+};
+
+test('two copies of one picture are found by thumbhash, size and dimensions', () => {
+  const groups = findDuplicateGroups({
+    media: [HAND_UPLOADED, SYNC_OWNED],
+    state: STATE_OWNING_OURS,
+  });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].kind, DUPLICATE_KIND.MIXED);
+  assert.equal(groups[0].copies.length, 2);
+});
+
+test('distinct pictures are not grouped', () => {
+  const groups = findDuplicateGroups({
+    media: [
+      HAND_UPLOADED,
+      mediaNode({ id: 'gid://shopify/MediaImage/b', filename: 'b.png', bytes: 12345 }),
+    ],
+    state: parseState(null),
+  });
+  assert.equal(groups.length, 0);
+});
+
+test('cleanup drops the copy the sync added and keeps the one already there', () => {
+  const groups = findDuplicateGroups({
+    media: [HAND_UPLOADED, SYNC_OWNED],
+    state: STATE_OWNING_OURS,
+  });
+  const removals = planDuplicateCleanup(groups);
+  assert.equal(removals.length, 1);
+  assert.equal(removals[0].mediaId, SYNC_OWNED.id, 'ours goes');
+  assert.equal(removals[0].keptMediaId, HAND_UPLOADED.id, 'theirs stays, and is re-adopted next run');
+});
+
+test('duplicates nobody owns are reported but never touched', () => {
+  const groups = findDuplicateGroups({
+    media: [
+      HAND_UPLOADED,
+      mediaNode({
+        id: 'gid://shopify/MediaImage/hand2',
+        filename: 'Comparison_copy.png',
+        bytes: COMPARISON_BYTES,
+        thumbhash: COMPARISON_THUMBHASH,
+      }),
+    ],
+    state: parseState(null),
+  });
+  assert.equal(groups[0].kind, DUPLICATE_KIND.ALL_UNMANAGED);
+  assert.equal(planDuplicateCleanup(groups).length, 0, 'this sync did not create these');
+});
+
+test('sibling-owned duplicates collapse to one copy, the rest detached', () => {
+  // The 9KBELY040* shape: one photo, five codes, five copies of it on the page.
+  const copies = BELCHER_CODES.map((code, index) =>
+    mediaNode({
+      id: `gid://shopify/MediaImage/belcher${index}`,
+      filename: `guid-for-${code}.png`,
+      bytes: BELCHER_BYTES,
+      thumbhash: 'PggCBwD4F9iId4d8g3uIZ4h4etCHB30I',
+    }),
+  );
+  const groups = findDuplicateGroups({
+    media: copies,
+    state: {
+      version: STATE_VERSION,
+      managed: BELCHER_CODES.map((code, index) => ({
+        url: belcherUrl(code),
+        mediaId: copies[index].id,
+        origin: MEDIA_ORIGIN.SYNCED,
+        productCode: code,
+      })),
+    },
+  });
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].kind, DUPLICATE_KIND.ALL_MANAGED);
+
+  const removals = planDuplicateCleanup(groups);
+  assert.equal(removals.length, 4, 'five copies of one picture become one');
+  assert.ok(
+    removals.every((removal) => removal.keptMediaId === copies[0].id),
+    'everything that goes points at the copy that stays',
+  );
+  assert.equal(
+    removals.some((removal) => removal.mediaId === copies[0].id),
+    false,
+    'the survivor is never itself detached',
+  );
+});
+
+test('a content key separates same-size pictures by their thumbhash', () => {
+  const a = { bytes: COMPARISON_BYTES, width: 1080, height: 1080, thumbhash: COMPARISON_THUMBHASH };
+  const b = { ...a, thumbhash: 'PggCBwD4F9iId4d8g3uIZ4h4etCHB30I' };
+  assert.notEqual(contentKey(a), contentKey(b));
+  assert.equal(contentKey(a), contentKey({ ...a }));
 });
 
 // --- daily report health verdict ---------------------------------------------

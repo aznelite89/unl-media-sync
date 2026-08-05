@@ -48,9 +48,65 @@ For each Unleashed product:
    - **adopted** — untracked, but existing Shopify media has the same filename, so it is claimed
      rather than duplicated (this is what stops the first run doubling up the image Unleashed's
      own connector already pushed — Shopify keeps the original basename and appends `_<uuid>`);
+   - **adopted by content** — untracked, and the filename does not match, but the bytes do. This
+     is the only way to recognise a photo somebody uploaded to Shopify by hand, or a sibling
+     variant's copy of the same photograph: Unleashed's API returns just `{ Url, IsDefault }` with
+     a GUID URL, and never the human filename its own UI shows, so the names can never agree. See
+     [Content identity](#content-identity);
    - **upload** — appended via `productUpdate`, one image per call so each new media id can be
      mapped back to its Unleashed URL.
 5. State is written back to the metafield.
+
+### Content identity
+
+Shopify re-hosts every image, so URLs can never be compared and the filename is normally all that
+survives. That is enough for anything Unleashed's own connector pushed, and useless for the two
+cases that produced every duplicate in this store:
+
+- a photo a person uploaded into Shopify directly — it keeps its human name, and the Unleashed
+  GUID never matches it (reported on **9KDP663-1**: three images in Unleashed, four in the shop);
+- **variants sharing one photograph**. Alloy and size are Shopify variant options, so several
+  Unleashed codes map to one Shopify product, and each holds its own copy of the same file under
+  its own GUID. On **9KBELY040\*** that meant five codes each adding the identical 127,626-byte
+  image — one picture filling the entire five-image page.
+
+So when an upload is pending **and** the page holds media this product code does not already own,
+both sides are fingerprinted and compared by **exact byte count plus exact pixel dimensions**:
+
+| side | source | cost |
+| --- | --- | --- |
+| Shopify | `originalSource.fileSize`, `image.width/height` — already in the media query | nothing |
+| Unleashed | one ranged GET of the first 4 KB; `Content-Range` gives the size, the body gives the dimensions | ~4 KB |
+
+No image is ever downloaded, and the result is written to state as `adopted_by_content`, so it
+costs one probe once and nothing on later runs. Byte count alone would be too weak and dimensions
+alone far too weak — this catalogue is full of 1080x1080 product shots, and a dimensions-only
+sweep flagged whole photoshoots as duplicates of each other. If a fingerprint cannot be taken the
+image is uploaded exactly as before, so an unreachable CDN never costs a product its images.
+
+Because a sibling's copy can now be claimed, **one media item can be referenced by several product
+codes' state entries**. Removal accounts for that: a code that drops an image never detaches media
+another code still points at, or the photograph would vanish for every variant still using it.
+
+### Finding duplicates that already exist
+
+```bash
+node scripts/sync-cli.js --duplicates --csv reports/duplicates.csv   # read-only
+node scripts/sync-cli.js --duplicates --apply                        # detaches
+```
+
+Detection is exact and free: Shopify returns `thumbhash`, its own perceptual digest, alongside the
+file size, so two media holding the same picture are identifiable without downloading anything.
+Each duplicate group is classified by what can safely be done:
+
+- **mixed** — one hand-uploaded copy plus one this sync added. `--apply` detaches the copy the sync
+  added and keeps the other, which the next run re-adopts by content.
+- **all managed** — sibling Unleashed codes each holding their own copy of one photograph.
+  `--apply` keeps the first copy and detaches the rest; those codes re-adopt the survivor.
+- **all unmanaged** — uploaded by hand more than once. Reported only; this sync did not create
+  them and does not remove media it never added.
+
+Nothing is deleted — `fileUpdate` removes the reference, and the file stays in Shopify's library.
 
 ### Guarantees
 
@@ -114,6 +170,21 @@ Admin API scopes required:
 | `read_files`, `write_files` | detach media from a product (`fileUpdate`) |
 
 Install the app, reveal the **Admin API access token** (`shpat_…`) → `SHOPIFY_ADMIN_TOKEN`.
+
+> `write_files` is easy to miss, because everything the sync does day to day runs on
+> `write_products` alone — only removal needs it. Without it `--duplicates --apply` and
+> `DELETE_REMOVED_MEDIA=true` fail with `ACCESS_DENIED` on `fileUpdate` and change nothing.
+> Check what the live token actually has before assuming:
+>
+> ```bash
+> curl -s -X POST "https://$SHOPIFY_STORE_DOMAIN/admin/api/2026-07/graphql.json" \
+>   -H "X-Shopify-Access-Token: $SHOPIFY_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+>   -d '{"query":"{ currentAppInstallation { accessScopes { handle } } }"}'
+> ```
+>
+> Adding a scope to an installed custom app means **reinstalling it and reissuing the token**,
+> so remember to update `SHOPIFY_ADMIN_TOKEN` in both `local.settings.json` and the Azure app
+> settings.
 
 ### 3. Turn off image sync in Unleashed's own connector
 
@@ -320,6 +391,10 @@ Deliveries older than 5 minutes are rejected.
   Unleashed after the old connector pushed it, the old file has a different filename, so it is
   neither adopted nor removed — it stays as unmanaged media. It must be deleted by hand in
   Shopify if unwanted.
+- **Duplicates already in Shopify are not repaired by the sync itself.** Content adoption stops new
+  ones; the copies added before it existed are cleared with `--duplicates --apply`.
+- **Two Unleashed images of one product that are byte-identical still both upload.** Deduplication
+  happens against what is on the Shopify page, not within a single product's own `Images[]`.
 - **Unmatched SKUs are reported, not fixed.** If no Shopify variant carries the Unleashed
   product code, the product is skipped with outcome `unmatched`. A code resolving to more than
   one Shopify product is skipped as `ambiguous`.

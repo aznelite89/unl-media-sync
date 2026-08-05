@@ -35,15 +35,20 @@ const { createUnleashedClient } = await import('../src/utils/unleashed.js');
 const { createShopifyClient } = await import('../src/utils/shopify.js');
 const { reconcile, syncByProductCode, lookbackSince } = await import('../src/utils/reconcile.js');
 const { auditCatalogue } = await import('../src/utils/audit.js');
-const { buildAuditCsv, buildAuditSummary } = await import('../src/utils/report.js');
+const { auditDuplicates } = await import('../src/utils/duplicates.js');
+const { buildAuditCsv, buildAuditSummary, buildDuplicateCsv, buildDuplicateSummary } = await import(
+  '../src/utils/report.js'
+);
 
 function parseArgs(argv) {
-  const args = { dryRun: false, all: false, audit: false };
+  const args = { dryRun: false, all: false, audit: false, duplicates: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--all') args.all = true;
     else if (arg === '--audit') args.audit = true;
+    else if (arg === '--duplicates') args.duplicates = true;
+    else if (arg === '--apply') args.apply = true;
     else if (arg === '--csv') args.csv = argv[++i];
     else if (arg === '--sku') args.sku = argv[++i];
     else if (arg === '--since') args.since = argv[++i];
@@ -61,7 +66,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 
-if (args.help || (!args.sku && !args.since && !args.all && !args.audit)) {
+if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.duplicates)) {
   console.log(
     [
       'Usage:',
@@ -74,6 +79,12 @@ if (args.help || (!args.sku && !args.since && !args.all && !args.audit)) {
       '',
       'Weekly audit, read-only — products whose images can never reach the site:',
       '  node scripts/sync-cli.js --audit [--csv reports/unmatched.csv]',
+      '',
+      'Duplicate media scan — the same picture twice on one product.',
+      'Read-only unless --apply is given, and even then it only ever detaches a',
+      'copy this sync uploaded, keeping the one that was already there:',
+      '  node scripts/sync-cli.js --duplicates [--csv reports/duplicates.csv]',
+      '  node scripts/sync-cli.js --duplicates --apply',
     ].join('\n'),
   );
   process.exit(args.help ? 0 : 1);
@@ -96,13 +107,26 @@ console.log(
     `delete removed: ${config.deleteRemovedMedia}  dry run: ${config.dryRun}`,
 );
 
+function writeCsv(destination, contents, description) {
+  fs.mkdirSync(path.dirname(path.resolve(destination)), { recursive: true });
+  fs.writeFileSync(path.resolve(destination), `${contents}\n`);
+  console.log(`Wrote ${description} to ${destination}`);
+}
+
 if (args.audit) {
   const audit = await auditCatalogue({ unleashed, shopify, log });
   console.log(`\n${buildAuditSummary({ audit }).text}\n`);
-  if (args.csv) {
-    fs.mkdirSync(path.dirname(path.resolve(args.csv)), { recursive: true });
-    fs.writeFileSync(path.resolve(args.csv), buildAuditCsv(audit));
-    console.log(`Wrote ${audit.unmatched.length} row(s) to ${args.csv}`);
+  if (args.csv) writeCsv(args.csv, buildAuditCsv(audit), `${audit.unmatched.length} row(s)`);
+} else if (args.duplicates) {
+  // --apply is deliberately the only way to change anything here: detaching
+  // media is the one destructive thing this tool can do.
+  const audit = await auditDuplicates({ shopify, log, apply: args.apply && !config.dryRun });
+  console.log(`\n${buildDuplicateSummary({ audit, applied: args.apply }).text}\n`);
+  if (args.csv) writeCsv(args.csv, buildDuplicateCsv(audit), `${audit.products.length} product(s)`);
+  if (!args.apply && audit.repairable > 0) {
+    console.log(
+      `Nothing was changed. Re-run with --apply to detach ${audit.repairable} duplicate(s).`,
+    );
   }
 } else if (args.sku) {
   const result = await syncByProductCode({
