@@ -391,6 +391,25 @@ Deliveries older than 5 minutes are rejected.
   Unleashed after the old connector pushed it, the old file has a different filename, so it is
   neither adopted nor removed — it stays as unmanaged media. It must be deleted by hand in
   Shopify if unwanted.
+- **Content adoption cannot stop a SECOND writer from duplicating.** It stops this service adding a
+  copy of a picture already on the page. It cannot stop another integration adding its copy
+  *afterwards* — whoever writes second creates the duplicate.
+
+  As of 2026-08-05 that second writer is **`Syncio Multi Store Sync`**, which mirrors products into
+  this store from another Shopify store and brings their images under the source store's SKU-based
+  filenames (`9KDR704YSIZEM_1.png`), while this service uploads the same pictures from Unleashed
+  under GUID filenames. 79% of the catalogue (2,656 of 3,375 products) is Syncio-managed, tagged
+  `syncio-hidden`. Until image sync is disabled on the Syncio connection, duplicates reappear on
+  whichever products Syncio touches after this service has run, and `--duplicates --apply` is a
+  treadmill rather than a fix.
+
+  Unleashed's own connector is not the cause — its `Default Image → Product Image` toggle is off,
+  and it only ever covered one default image, never the numbered `_1`/`_2` files.
+
+  > Shopify logs no event and exposes no creator field for file uploads, so a second writer can only
+  > be identified indirectly — by app tags on the product (`syncio-hidden`) and by `updatedAt`
+  > landing within seconds of the file's `createdAt`. Timing alone proves nothing: this service's
+  > own backfills are bursty and look equally "human".
 - **Duplicates already in Shopify are not repaired by the sync itself.** Content adoption stops new
   ones; the copies added before it existed are cleared with `--duplicates --apply`.
 - **Two Unleashed images of one product that are byte-identical still both upload.** Deduplication
