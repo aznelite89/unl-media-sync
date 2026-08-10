@@ -304,6 +304,94 @@ test('an image already placed by a sibling is reused, not uploaded twice', () =>
   assert.equal(plan.toDetach.length, 0);
 });
 
+// --- replaced images must not be stranded ------------------------------------
+//
+// 18KDP240/9KDP240: the Unleashed photo was swapped, the old Shopify image was
+// left in place because DELETE_REMOVED_MEDIA is off, and its state entry was
+// rewritten away. It became unowned — and the sync never removes media it does
+// not own, so it could never be cleaned up afterwards.
+
+const REPLACED_STATE = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: 'https://unl/old-photo.png',
+      mediaId: 'gid://shopify/MediaImage/OLD',
+      origin: MEDIA_ORIGIN.SYNCED,
+      isDefault: true,
+      productCode: '18KDP240',
+    },
+  ],
+};
+
+test('an image Unleashed dropped keeps its ownership record while it is still on the page', () => {
+  const plan = planMediaChanges({
+    desired: [{ url: 'https://unl/new-photo.png', isDefault: true }],
+    liveMedia: [
+      {
+        id: 'gid://shopify/MediaImage/OLD',
+        status: MEDIA_STATUS.READY,
+        image: { url: 'https://cdn.shopify.com/s/files/1/x/files/old-photo.png?v=1' },
+      },
+    ],
+    state: REPLACED_STATE,
+    productCode: '18KDP240',
+  });
+  assert.equal(plan.toDetach.length, 1, 'the replaced image is a detach candidate');
+
+  // DELETE_REMOVED_MEDIA off: nothing was detached, so nothing may be forgotten.
+  const next = buildState({
+    productCode: '18KDP240',
+    entries: [
+      {
+        url: 'https://unl/new-photo.png',
+        mediaId: 'gid://shopify/MediaImage/NEW',
+        origin: MEDIA_ORIGIN.SYNCED,
+        isDefault: true,
+      },
+    ],
+    previousManaged: REPLACED_STATE.managed,
+    liveMediaIds: new Set(['gid://shopify/MediaImage/OLD', 'gid://shopify/MediaImage/NEW']),
+    retained: plan.toDetach,
+  });
+
+  const ids = next.managed.map((entry) => entry.mediaId).sort();
+  assert.deepEqual(ids, ['gid://shopify/MediaImage/NEW', 'gid://shopify/MediaImage/OLD']);
+  const old = next.managed.find((entry) => entry.mediaId === 'gid://shopify/MediaImage/OLD');
+  assert.equal(old.productCode, '18KDP240', 'the old image stays owned by the code that added it');
+  assert.equal(old.isDefault, false, 'an image Unleashed dropped is nobody’s default');
+});
+
+test('a retained entry is dropped once its media really is gone from Shopify', () => {
+  const next = buildState({
+    productCode: '18KDP240',
+    entries: [],
+    previousManaged: REPLACED_STATE.managed,
+    liveMediaIds: new Set(), // detached successfully, or removed by hand
+    retained: REPLACED_STATE.managed,
+  });
+  assert.equal(next.managed.length, 0);
+});
+
+test('a retained entry never duplicates one this run just wrote', () => {
+  const next = buildState({
+    productCode: '18KDP240',
+    entries: [
+      {
+        url: 'https://unl/new-photo.png',
+        mediaId: 'gid://shopify/MediaImage/OLD',
+        origin: MEDIA_ORIGIN.ADOPTED_BY_CONTENT,
+        isDefault: true,
+      },
+    ],
+    previousManaged: REPLACED_STATE.managed,
+    liveMediaIds: new Set(['gid://shopify/MediaImage/OLD']),
+    retained: REPLACED_STATE.managed,
+  });
+  assert.equal(next.managed.length, 1, 'one media item, one entry');
+  assert.equal(next.managed[0].isDefault, true);
+});
+
 test('stale sibling entries are dropped from state when their media is gone', () => {
   const next = buildState({
     productCode: '18K101-4',

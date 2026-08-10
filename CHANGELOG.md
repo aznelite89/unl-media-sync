@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-11
+
+### Fixed
+- Replacing a product's image in Unleashed no longer strands the old one in Shopify forever. With `DELETE_REMOVED_MEDIA` off the old media is deliberately left on the page, but `buildState` rewrote this product code's entries from the new image list alone, so the ownership record was dropped while the picture stayed. It then looked hand-added — and this sync never removes media it did not add — putting it permanently beyond both `DELETE_REMOVED_MEDIA` and `--duplicates --apply`. Reported by Christina on 18KDP240/9KDP240, whose old low-quality default had already become unowned this way.
+
+### Added
+- `retained` on `buildState`. Media this code owns that Unleashed dropped but which is still on the page — deletion disabled, or the detach threw — keeps its entry, recorded as no longer default. Both call sites pass it: the early-return path retains everything, the main path retains only what the detach did not actually remove, so a thrown detach cannot lose the record either.
+
+### Notes
+- **Production had been running the 4 Aug build.** The package behind `WEBSITE_RUN_FROM_PACKAGE` was `20260804011604`, so none of the 5 Aug work — content-based adoption, sibling sharing, duplicate reporting, `weeklyDuplicateAudit` — was ever live, and the deployed function list was missing that function entirely. Filename-only matching is why 18KDP240 and 9KDP240 each uploaded their own copy of one photograph an hour apart on 10 Aug. Replaying the 07:40 decision against the repo adopts the sibling's copy instead: 0 uploads.
+- That also explains most of "duplicates started reappearing within minutes" from 5 Aug. A store-wide scan today found 46 products carrying a duplicated picture and 61 removable copies, against a clean re-scan on 5 Aug — 40 of the 46 are two sync-uploaded copies, i.e. this bug, not the unidentified second writer. The 6 `mixed` products remain that writer's.
+
 ## 2026-08-05 (later)
 
 ### Added

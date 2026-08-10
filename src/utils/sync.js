@@ -409,6 +409,9 @@ export async function syncUnleashedProduct({
           entries: plan.resolved,
           previousManaged: state.managed,
           liveMediaIds: liveMediaIdsBefore,
+          // Nothing was detached on this path, so everything Unleashed dropped is
+          // still on the page and must keep its ownership record.
+          retained: plan.toDetach,
         }),
       });
     }
@@ -503,6 +506,11 @@ export async function syncUnleashedProduct({
     }
   }
 
+  // Whatever we meant to detach but did not — deletion disabled, or the call
+  // threw — is still on the page, so it keeps its ownership record.
+  const detachedIds = new Set(result.detached);
+  const stillOnPage = plan.toDetach.filter((entry) => !detachedIds.has(entry.mediaId));
+
   await shopify.saveState({
     productId: shopifyProductId,
     state: buildState({
@@ -510,6 +518,7 @@ export async function syncUnleashedProduct({
       entries,
       previousManaged: state.managed,
       liveMediaIds: knownMediaIds,
+      retained: stillOnPage,
     }),
   });
 

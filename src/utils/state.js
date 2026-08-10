@@ -42,12 +42,36 @@ export function parseState(metafield) {
  * siblings would make their images look unowned and, with deletion enabled,
  * expose them to being detached.
  *
- * @param {{ productCode: string, entries: object[], previousManaged?: object[], liveMediaIds?: Set<string> }} input
+ * `retained` is the other half of that guarantee, for this code's own images:
+ * media Unleashed no longer lists but which is STILL ON THE PAGE, because
+ * `DELETE_REMOVED_MEDIA` is off or the detach call failed. Writing only
+ * `entries` would drop its ownership record while leaving the picture in place,
+ * so the sync would forget it ever put it there — the image becomes unowned,
+ * indistinguishable from one added by hand, and therefore permanently beyond
+ * both `DELETE_REMOVED_MEDIA` and the duplicate cleanup, which by design never
+ * touch media this service did not add. Replacing an image in Unleashed would
+ * quietly strand the old one in the shop forever.
+ *
+ * @param {{ productCode: string, entries: object[], previousManaged?: object[], liveMediaIds?: Set<string>, retained?: object[] }} input
  */
-export function buildState({ productCode, entries, previousManaged = [], liveMediaIds }) {
+export function buildState({
+  productCode,
+  entries,
+  previousManaged = [],
+  liveMediaIds,
+  retained = [],
+}) {
   const foreign = previousManaged.filter(
     (entry) =>
       entry.productCode !== productCode && (!liveMediaIds || liveMediaIds.has(entry.mediaId)),
+  );
+
+  // An image Unleashed dropped is no longer anyone's default, and it must not
+  // shadow an entry this run just wrote for the same media.
+  const claimed = new Set(entries.map((entry) => entry.mediaId));
+  const stranded = retained.filter(
+    (entry) =>
+      !claimed.has(entry.mediaId) && (!liveMediaIds || liveMediaIds.has(entry.mediaId)),
   );
 
   return {
@@ -60,6 +84,13 @@ export function buildState({ productCode, entries, previousManaged = [], liveMed
         mediaId: entry.mediaId,
         origin: entry.origin,
         isDefault: entry.isDefault === true,
+        productCode,
+      })),
+      ...stranded.map((entry) => ({
+        url: entry.url,
+        mediaId: entry.mediaId,
+        origin: entry.origin,
+        isDefault: false,
         productCode,
       })),
     ],
