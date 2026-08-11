@@ -11,6 +11,11 @@
 ### Notes
 - **Production had been running the 4 Aug build.** The package behind `WEBSITE_RUN_FROM_PACKAGE` was `20260804011604`, so none of the 5 Aug work — content-based adoption, sibling sharing, duplicate reporting, `weeklyDuplicateAudit` — was ever live, and the deployed function list was missing that function entirely. Filename-only matching is why 18KDP240 and 9KDP240 each uploaded their own copy of one photograph an hour apart on 10 Aug. Replaying the 07:40 decision against the repo adopts the sibling's copy instead: 0 uploads.
 - That also explains most of "duplicates started reappearing within minutes" from 5 Aug. A store-wide scan today found 46 products carrying a duplicated picture and 61 removable copies, against a clean re-scan on 5 Aug — 40 of the 46 are two sync-uploaded copies, i.e. this bug, not the unidentified second writer. The 6 `mixed` products remain that writer's.
+- Deployed 2026-08-11 00:32 UTC, package `20260811000742-08bcd12e…`. `az functionapp deployment source config-zip` cannot be used on this app: SCM basic publishing credentials are disabled (`basicPublishingCredentialsPolicies/scm` → `allow: false`), so the Kudu ZipDeploy endpoint returns 401 and Azure records no deployment at all. The working path is the one `func` itself uses — upload the package to the `function-releases` container, then point `WEBSITE_RUN_FROM_PACKAGE` at it with a read SAS. `scripts/deploy.sh` shipped in the 4 Aug package but is not in the repo; it assumed Core Tools. Confirmed live by the host logging `6 functions loaded` where the old package had 5.
+- The old low-resolution default image was detached from both reported products — `36674331082905` (YG, 1000x729, uploaded 3 Jul) and `35719963246745` (WG, 1000x729, uploaded 29 Jan). Both predate this service and no state entry claimed them, so neither `DELETE_REMOVED_MEDIA` nor `--duplicates --apply` would ever have removed them; this was a deliberate one-off. The high-resolution Unleashed image is now each product's default.
+
+### Pending
+- `node scripts/sync-cli.js --duplicates --apply` has NOT been run. 46 products still carry a duplicated picture, 61 removable copies, the two reported products among them. Nothing further will be created now the fix is live, but the existing copies stay until this is run.
 
 ## 2026-08-05 (later)
 
