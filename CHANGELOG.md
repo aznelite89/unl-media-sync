@@ -3,9 +3,11 @@
 ## 2026-08-11
 
 ### Fixed
+- Content adoption no longer gives up on a JPEG whose frame header sits past the first 4 KB. `IMAGE_PROBE_BYTES` was documented as clearing "even a long EXIF block"; it does not. The 9KDR251SIZE* eternity ring photographs carry an ICC profile that puts the dimensions beyond 16 KB, so `readImageSize` returned null, the fingerprint with it, and adoption fell through to uploading — every sibling product code adding its own copy of one photograph. `fetchImageFingerprint` now re-probes at `IMAGE_PROBE_BYTES_MAX` (64 KB) when, and only when, the first read finds a file it cannot measure. Caught by the cleanup below: a fresh duplicate appeared within 90 minutes of the store being verified clean, on code deployed an hour earlier. `9KDR251SIZEN` now adopts by content instead of uploading.
 - Replacing a product's image in Unleashed no longer strands the old one in Shopify forever. With `DELETE_REMOVED_MEDIA` off the old media is deliberately left on the page, but `buildState` rewrote this product code's entries from the new image list alone, so the ownership record was dropped while the picture stayed. It then looked hand-added — and this sync never removes media it did not add — putting it permanently beyond both `DELETE_REMOVED_MEDIA` and `--duplicates --apply`. Reported by Christina on 18KDP240/9KDP240, whose old low-quality default had already become unowned this way.
 
 ### Added
+- `IMAGE_PROBE_BYTES_MAX`, and an escalating second probe in `fetchImageFingerprint`. The common case still costs one 4 KB request; only an image whose dimensions are not in it pays for a second. An image unmeasurable even at 64 KB still falls back to uploading, so an odd file can never cost a product its pictures — but it now says so in the log rather than failing silently.
 - `retained` on `buildState`. Media this code owns that Unleashed dropped but which is still on the page — deletion disabled, or the detach threw — keeps its entry, recorded as no longer default. Both call sites pass it: the early-return path retains everything, the main path retains only what the detach did not actually remove, so a thrown detach cannot lose the record either.
 
 ### Notes

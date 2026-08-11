@@ -29,7 +29,11 @@
  * 1080x1080 and Shopify's own `thumbhash` of the two was identical.
  */
 
-import { HTTP_PARTIAL_CONTENT, IMAGE_PROBE_BYTES } from '../constants/index.js';
+import {
+  HTTP_PARTIAL_CONTENT,
+  IMAGE_PROBE_BYTES,
+  IMAGE_PROBE_BYTES_MAX,
+} from '../constants/index.js';
 import { imageKey } from './imageIdentity.js';
 
 /** JPEG frame headers carry the dimensions; these three markers only look like them. */
@@ -119,18 +123,34 @@ export function totalBytesOf(response, buffer) {
  * @returns {Promise<{ bytes: number, width: number, height: number } | null>}
  */
 export async function fetchImageFingerprint(url, { log, fetchImpl = fetch } = {}) {
-  try {
+  const read = async (probeBytes) => {
     const response = await fetchImpl(url, {
-      headers: { Range: `bytes=0-${IMAGE_PROBE_BYTES - 1}` },
+      headers: { Range: `bytes=0-${probeBytes - 1}` },
     });
     if (!response.ok) return null;
 
     const buffer = Buffer.from(await response.arrayBuffer());
-    const bytes = totalBytesOf(response, buffer);
-    const size = readImageSize(buffer);
-    if (!bytes || !size) return null;
+    return { bytes: totalBytesOf(response, buffer), size: readImageSize(buffer) };
+  };
 
-    return { bytes, width: size.width, height: size.height };
+  try {
+    let head = await read(IMAGE_PROBE_BYTES);
+    if (!head) return null;
+
+    // A JPEG with a big ICC or EXIF block keeps its frame header well past 4 KB.
+    // Failing here used to mean no fingerprint and therefore a duplicate upload,
+    // so it is worth one more request before giving up.
+    if (head.bytes && !head.size && head.bytes > IMAGE_PROBE_BYTES) {
+      log?.info?.(`${url}: dimensions not in the first ${IMAGE_PROBE_BYTES} bytes, re-probing`);
+      head = (await read(IMAGE_PROBE_BYTES_MAX)) ?? head;
+    }
+
+    if (!head.bytes || !head.size) {
+      log?.warn?.(`could not read dimensions for ${url}; it will be treated as a new image`);
+      return null;
+    }
+
+    return { bytes: head.bytes, width: head.size.width, height: head.size.height };
   } catch (error) {
     log?.warn?.(`could not fingerprint ${url} — ${error.message}`);
     return null;

@@ -273,12 +273,27 @@ export const RECONCILE_MAX_PAGES = 25;
 /**
  * Bytes read from the head of an Unleashed image to fingerprint it.
  *
- * Enough to cover a PNG's IHDR (byte 16) and a JPEG's frame header even behind a
- * long EXIF block, while the `Content-Range` on the reply carries the file's
- * total size. So one 4 KB request yields both halves of the fingerprint without
- * ever downloading the picture.
+ * Covers a PNG's IHDR (byte 16) and most JPEG frame headers, while the
+ * `Content-Range` on the reply carries the file's total size — so one 4 KB
+ * request usually yields both halves of the fingerprint without ever
+ * downloading the picture.
  */
 export const IMAGE_PROBE_BYTES = 4096;
+
+/**
+ * Second, larger probe, used only when the first cannot find the dimensions.
+ *
+ * 4 KB was assumed to clear "even a long EXIF block". It does not: the
+ * 9KDR251SIZE* eternity ring photographs carry an ICC profile that pushes the
+ * JPEG frame header past 16 KB. `readImageSize` then returned null, the
+ * fingerprint with it, and content adoption silently fell back to uploading —
+ * so every sibling product code added its own copy of one photograph, exactly
+ * the duplicate that fingerprinting exists to prevent.
+ *
+ * Escalating rather than simply raising the first probe keeps the common case
+ * at 4 KB; only images that need it pay for the second request.
+ */
+export const IMAGE_PROBE_BYTES_MAX = 65536;
 
 /** `206 Partial Content` — a range request the CDN honoured. */
 export const HTTP_PARTIAL_CONTENT = 206;

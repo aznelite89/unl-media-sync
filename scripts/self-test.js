@@ -35,6 +35,7 @@ import { reconcile } from '../src/utils/reconcile.js';
 import { imageKey, isSameImage, orderedUnleashedImages } from '../src/utils/imageIdentity.js';
 import {
   contentKey,
+  fetchImageFingerprint,
   isSameContent,
   readImageSize,
   shopifyFingerprint,
@@ -613,6 +614,78 @@ test('image dimensions are read from a JPEG behind a leading segment', () => {
 test('unrecognisable bytes yield no size rather than a wrong one', () => {
   assert.equal(readImageSize(Buffer.alloc(32)), null);
   assert.equal(readImageSize(Buffer.alloc(4)), null);
+});
+
+// --- a frame header past the first probe -------------------------------------
+//
+// The 9KDR251SIZE* eternity ring photographs carry an ICC profile that puts the
+// JPEG frame header beyond 16 KB. The 4 KB probe read no dimensions, so the
+// fingerprint came back null, adoption fell through, and each sibling code
+// uploaded its own copy of one photograph.
+
+/** A JPEG whose frame header sits behind an APP2 block of `padding` bytes. */
+const jpegBehindLargeSegment = (width, height, padding) => {
+  const app2 = Buffer.alloc(2 + padding);
+  app2[0] = 0xff;
+  app2[1] = 0xe2;
+  app2.writeUInt16BE(padding, 2);
+
+  const sof = Buffer.alloc(2 + 11);
+  sof[0] = 0xff;
+  sof[1] = 0xc0;
+  sof.writeUInt16BE(11, 2);
+  sof[4] = 8;
+  sof.writeUInt16BE(height, 5);
+  sof.writeUInt16BE(width, 7);
+
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app2, sof, Buffer.from([0xff, 0xd9])]);
+};
+
+/** Serves ranged reads of `file`, counting requests. */
+const rangeServer = (file) => {
+  const ranges = [];
+  const fetchImpl = async (_url, options) => {
+    const end = Number(/bytes=0-(\d+)/.exec(options.headers.Range)[1]);
+    const slice = file.subarray(0, Math.min(end + 1, file.length));
+    ranges.push(end + 1);
+    return {
+      ok: true,
+      status: 206,
+      headers: {
+        get: (name) =>
+          name.toLowerCase() === 'content-range'
+            ? `bytes 0-${slice.length - 1}/${file.length}`
+            : null,
+      },
+      arrayBuffer: async () => slice,
+    };
+  };
+  return { fetchImpl, ranges };
+};
+
+test('a JPEG frame header past the first probe is still fingerprinted', async () => {
+  const file = jpegBehindLargeSegment(1500, 1500, 20000);
+  const { fetchImpl, ranges } = rangeServer(file);
+
+  const fingerprint = await fetchImageFingerprint('https://unl/ring.jpg', { fetchImpl });
+
+  assert.deepEqual(fingerprint, { bytes: file.length, width: 1500, height: 1500 });
+  assert.equal(ranges.length, 2, 'should escalate to a second, larger probe');
+  assert.ok(ranges[1] > ranges[0]);
+});
+
+test('an image readable from the first probe costs exactly one request', async () => {
+  const { fetchImpl, ranges } = rangeServer(pngHeader(1080, 1350));
+
+  const fingerprint = await fetchImageFingerprint('https://unl/pendant.png', { fetchImpl });
+
+  assert.equal(fingerprint.width, 1080);
+  assert.equal(ranges.length, 1, 'the common case must not pay for a second request');
+});
+
+test('an image whose dimensions are unreadable at any size yields no fingerprint', async () => {
+  const { fetchImpl } = rangeServer(Buffer.alloc(50_000, 0x7f));
+  assert.equal(await fetchImageFingerprint('https://unl/junk.bin', { fetchImpl }), null);
 });
 
 test('the total file size comes off the Content-Range of a ranged reply', () => {
