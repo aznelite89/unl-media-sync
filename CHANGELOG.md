@@ -19,7 +19,7 @@
 
 - Backlog cleared again, 2026-08-11. `--duplicates --apply` detached 154 copies across 99 products with no failures, and a full read-only re-scan of all 3,378 products afterwards reports zero duplicates and no truncation. The eight products that lost the most copies were checked individually and all still carry images. Both reported products are down to a single image — the high-resolution Unleashed one — where each had three.
 - Across a 120-image sample of the Unleashed catalogue, 110 were measurable from the 4 KB probe, 9 needed the 64 KB re-probe and 1 could not be measured at either size. Every PNG (44) was fine; 10 of 76 JPEGs were not. So roughly 7% of images were silently unfingerprintable and duplicated once per sibling product code — a steady drip, not a one-off. The one image unreadable at 64 KB still falls back to uploading and will still duplicate; it is logged now rather than silent.
-- Unlike 5 Aug, the fix that stops these being recreated is now actually deployed, so this cleanup should hold. `weeklyDuplicateAudit` (Mondays 09:00 AEST) is live for the first time and will say so if it does not.
+- Final state: a read-only scan of all 3,399 products after both fixes were deployed reports zero duplicates, with no truncation. Unlike 5 Aug, the fixes that stop these being recreated are now actually deployed, so this cleanup should hold. `weeklyDuplicateAudit` (Mondays 09:00 AEST) is live for the first time and will say so if it does not.
 
 ## 2026-08-05 (later)
 
