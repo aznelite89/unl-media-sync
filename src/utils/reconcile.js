@@ -1,4 +1,8 @@
-import { SYNC_OUTCOME } from '../constants/index.js';
+import {
+  EMPTY_IMAGES_CORROBORATION_MIN,
+  EMPTY_IMAGES_MAX_PER_RUN,
+  SYNC_OUTCOME,
+} from '../constants/index.js';
 import { summariseDuplicateGroups } from './duplicates.js';
 import { summarise } from './logger.js';
 import { syncUnleashedProduct } from './sync.js';
@@ -28,8 +32,20 @@ export async function syncByGuid({ guid, unleashed, shopify, config, log }) {
 
 /**
  * Syncs one product identified by its product code / SKU (the manual path).
+ *
+ * `emptyImagesConfirmed` defaults to true here and nowhere else: a person naming
+ * one SKU on the command line is the corroboration a scheduled run has to infer
+ * from its own evidence. This is the way to clear a product whose last image was
+ * deleted in Unleashed.
  */
-export async function syncByProductCode({ productCode, unleashed, shopify, config, log }) {
+export async function syncByProductCode({
+  productCode,
+  unleashed,
+  shopify,
+  config,
+  log,
+  emptyImagesConfirmed = true,
+}) {
   const product = await unleashed.getProductByCode(productCode);
   if (!product) {
     return {
@@ -38,7 +54,13 @@ export async function syncByProductCode({ productCode, unleashed, shopify, confi
       notes: [`No Unleashed product with code ${productCode}`],
     };
   }
-  return syncUnleashedProduct({ unleashedProduct: product, shopify, config, log });
+  return syncUnleashedProduct({
+    unleashedProduct: product,
+    shopify,
+    config,
+    log,
+    emptyImagesConfirmed,
+  });
 }
 
 /**
@@ -61,6 +83,15 @@ export async function reconcile({
   const results = [];
   let scanned = 0;
   let lastPage = null;
+  /**
+   * Products Unleashed returned with no images at all. Held back rather than
+   * skipped: whether that means "the last photo was deleted" or "the feed is
+   * having a bad day" cannot be told from the product, only from whether the
+   * feed is serving image data at all — and that is not worth establishing
+   * until the walk has finished and it is known whether anything needs it.
+   */
+  const emptyImageProducts = [];
+  let withImagesSeen = 0;
 
   for await (const { items, pageNumber, totalPages } of unleashed.iterateProducts({
     sinceIso,
@@ -73,36 +104,99 @@ export async function reconcile({
     for (const unleashedProduct of items) {
       if (limit && results.length >= limit) {
         log.info?.(`reconcile: stopping at limit of ${limit} product(s)`);
-        return finish({ results, scanned, sinceIso, truncated: true, lastPage });
+        return finish({
+          results,
+          scanned,
+          withImagesSeen,
+          sinceIso,
+          truncated: true,
+          lastPage,
+          config,
+        });
       }
 
       scanned += 1;
-      // Products without images are the common case; skip before touching Shopify.
-      if (!(unleashedProduct?.Images ?? []).length) continue;
-
-      try {
-        const result = await syncUnleashedProduct({ unleashedProduct, shopify, config, log });
-        results.push(result);
-        if (result.outcome !== SYNC_OUTCOME.UNCHANGED) {
-          log.info?.(
-            `reconcile: ${result.productCode} → ${result.outcome}` +
-              (result.notes.length ? ` (${result.notes.join('; ')})` : ''),
-          );
-        }
-      } catch (error) {
-        log.error?.(
-          `reconcile: ${unleashedProduct?.ProductCode ?? unleashedProduct?.Guid} failed — ${error.message}`,
-        );
-        results.push({
-          productCode: unleashedProduct?.ProductCode ?? null,
-          outcome: SYNC_OUTCOME.FAILED,
-          notes: [error.message],
-        });
+      if (!(unleashedProduct?.Images ?? []).length) {
+        // Never touches Shopify here — most of these products simply have no
+        // photos and never did. Decided once, after the walk.
+        emptyImageProducts.push(unleashedProduct);
+        continue;
       }
+      withImagesSeen += 1;
+
+      await syncOne(unleashedProduct);
     }
   }
 
-  return finish({ results, scanned, sinceIso, truncated: false, lastPage });
+  // The empty-image products, decided now that the feed can be vouched for.
+  if (emptyImageProducts.length > 0) {
+    const evidence = await corroborateEmptyImages({
+      withImagesSeen,
+      unleashed,
+      log,
+    });
+    if (evidence.corroborated) {
+      log.info?.(
+        `reconcile: ${emptyImageProducts.length} product(s) list no images; ` +
+          `${evidence.detail}, so the feed is sound`,
+      );
+      const checking = emptyImageProducts.slice(0, EMPTY_IMAGES_MAX_PER_RUN);
+      if (checking.length < emptyImageProducts.length) {
+        // Never silent — a run that quietly stopped short would read as "the
+        // whole catalogue is clean".
+        log.warn?.(
+          `reconcile: checking ${checking.length} of ${emptyImageProducts.length} image-less ` +
+            `product(s) this run (cap ${EMPTY_IMAGES_MAX_PER_RUN}); the rest are left for the ` +
+            'next one.',
+        );
+      }
+      for (const unleashedProduct of checking) {
+        await syncOne(unleashedProduct, true);
+      }
+    } else {
+      // Could not establish that the feed is returning image data at all. Left
+      // alone, which is what this did unconditionally before 2026-08-21.
+      log.warn?.(
+        `reconcile: ${emptyImageProducts.length} product(s) list no images, but ` +
+          `${evidence.detail} — not enough to rule out an Unleashed fault, so none were ` +
+          'touched. The next run will look again.',
+      );
+    }
+  }
+
+  return finish({ results, scanned, withImagesSeen, sinceIso, truncated: false, lastPage, config });
+
+  /**
+   * @param {object} unleashedProduct
+   * @param {boolean} [emptyImagesConfirmed]
+   */
+  async function syncOne(unleashedProduct, emptyImagesConfirmed = false) {
+    try {
+      const result = await syncUnleashedProduct({
+        unleashedProduct,
+        shopify,
+        config,
+        log,
+        emptyImagesConfirmed,
+      });
+      results.push(result);
+      if (result.outcome !== SYNC_OUTCOME.UNCHANGED) {
+        log.info?.(
+          `reconcile: ${result.productCode} → ${result.outcome}` +
+            (result.notes.length ? ` (${result.notes.join('; ')})` : ''),
+        );
+      }
+    } catch (error) {
+      log.error?.(
+        `reconcile: ${unleashedProduct?.ProductCode ?? unleashedProduct?.Guid} failed — ${error.message}`,
+      );
+      results.push({
+        productCode: unleashedProduct?.ProductCode ?? null,
+        outcome: SYNC_OUTCOME.FAILED,
+        notes: [error.message],
+      });
+    }
+  }
 }
 
 /**
@@ -149,12 +243,63 @@ function countChecked(results) {
   return results.filter((result) => !unchecked.includes(result.outcome)).length;
 }
 
-function finish({ results, scanned, sinceIso, truncated, lastPage }) {
+/**
+ * Decides whether an empty `Images[]` can be believed.
+ *
+ * The run's own window is the cheap answer and usually the wrong one: a ten
+ * minute slice of a catalogue this size routinely holds a handful of products
+ * and none with photos, which would leave a deleted last image sitting on the
+ * website until it aged out of the window and stopped being visited at all.
+ *
+ * So when the window cannot vouch for the feed, ask the catalogue directly —
+ * one unfiltered page, no `modifiedSince`. Products carrying images in that page
+ * prove Unleashed is returning image data right now, which is the only thing
+ * that needs proving; a fault serving stripped products fails it. One request,
+ * and only on runs that saw an empty list.
+ *
+ * @param {{ withImagesSeen: number, unleashed: object, log: object }} input
+ * @returns {Promise<{ corroborated: boolean, detail: string }>}
+ */
+async function corroborateEmptyImages({ withImagesSeen, unleashed, log }) {
+  if (withImagesSeen >= EMPTY_IMAGES_CORROBORATION_MIN) {
+    return {
+      corroborated: true,
+      detail: `${withImagesSeen} other(s) in this run came back with images`,
+    };
+  }
+
+  try {
+    let probed = 0;
+    let withImages = 0;
+    for await (const { items } of unleashed.iterateProducts({
+      maxPages: 1,
+      warnOnTruncation: false,
+    })) {
+      probed += items.length;
+      withImages += items.filter((item) => (item?.Images ?? []).length > 0).length;
+    }
+    return {
+      corroborated: withImages >= EMPTY_IMAGES_CORROBORATION_MIN,
+      detail:
+        `${withImages} of ${probed} product(s) in a catalogue probe carry images ` +
+        `(${withImagesSeen} in this run's own window)`,
+    };
+  } catch (error) {
+    // A probe that cannot be taken is not evidence of anything. Say so and do
+    // nothing — never the other way round.
+    log.warn?.(`reconcile: catalogue probe failed — ${error.message}`);
+    return { corroborated: false, detail: `the catalogue probe failed (${error.message})` };
+  }
+}
+
+function finish({ results, scanned, withImagesSeen, sinceIso, truncated, lastPage, config }) {
   const morePages = lastPage && lastPage.pageNumber < lastPage.totalPages;
   return {
     sinceIso: sinceIso ?? null,
     scanned,
-    withImages: results.length,
+    // Products that actually had images, not the size of `results` — image-less
+    // products now enter `results` too when the run corroborates them.
+    withImages: withImagesSeen,
     truncated,
     lastPage: lastPage?.pageNumber ?? null,
     totalPages: lastPage?.totalPages ?? null,
@@ -166,6 +311,12 @@ function finish({ results, scanned, sinceIso, truncated, lastPage }) {
      * product whose outcome is `unchanged`, and `details` drops those as noise.
      */
     duplicates: { ...collectDuplicates(results), productsChecked: countChecked(results) },
+    /**
+     * Whether removal was on for this run. A retained image means two different
+     * things depending on it — a deliberate steady state, or a detach that did
+     * not take — and only the second is worth a verdict.
+     */
+    removalEnabled: Boolean(config?.deleteRemovedMedia),
     /** Only the interesting ones — unchanged products are the bulk and are noise. */
     details: results.filter((result) => result.outcome !== SYNC_OUTCOME.UNCHANGED),
   };

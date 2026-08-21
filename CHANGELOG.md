@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-21
+
+### Added
+- `retained` sync outcome. An image deleted in Unleashed that is still on the Shopify product now reports as `retained` instead of `synced` or `unchanged`, both of which the daily report drops as noise. Surfaced when a team member deleted an image around 19 Aug and it stayed on the website: the note explaining it (`"N previously synced image(s) no longer in Unleashed, left in place"`) had been written since the beginning, but `reconcile.js` filters `unchanged` out of `details` and `DAILY_REPORTED_OUTCOMES` never contained `synced`, so it could not reach anyone through any path. There was no `log.warn` either. Same reasoning that created `capped`.
+- `retained` covers a detach that *failed* as well as one that was never attempted, so with removal now on, an `ACCESS_DENIED` on `fileUpdate` no longer reports as a clean sync.
+- The daily report carries a `Deleted in Unleashed, still on Shopify` count, and warns on it only when `DELETE_REMOVED_MEDIA` is on — with removal off it is the documented steady state, and warning daily on a setting nobody intends to change is how a report earns an inbox filter. `report.removalEnabled` is what tells the two apart.
+
+### Changed
+- `DELETE_REMOVED_MEDIA=true` in production. Deleting an image in Unleashed now takes it off the Shopify product on the next reconcile. This was step 5 of the documented rollout, unblocked by the 11 Aug metafield cleanup; the code default stays `false`.
+
+### Fixed
+- Deleting the **last** image a product has now removes it from Shopify. `syncUnleashedProduct` returned `no_images` before its first Shopify call and `reconcile` skipped image-less products before that, so a product whose Unleashed image list dropped to zero was never examined at all: no detach even with removal on, no state rewrite, no note, and `no_images` is not a reported outcome. Found while writing the tests for the above, and verified directly against the sync with removal enabled — Shopify was not contacted.
+- Acting on an empty `Images[]` is guarded rather than unconditional, because a transient Unleashed fault returning products with their images stripped is indistinguishable, per product, from a deliberate deletion — and getting it wrong takes every photograph off a live product. `reconcile` now holds image-less products back during the walk and only acts once the feed can be vouched for: at least `EMPTY_IMAGES_CORROBORATION_MIN` (5) products carrying images. Confirmed products then go through the ordinary plan, so sibling-owned media, unmanaged media and `DELETE_REMOVED_MEDIA` all still apply.
+- The corroboration falls back to a **one-page catalogue probe** when the run's own window cannot supply it. Caught on the live deployment: the first two runs after it went out scanned 35 products with 4 carrying images, then 26 with 0 — a ten-minute window almost never clears a threshold of 5, so removal would effectively never have fired, and a product not modified again drops out of the window and is never visited again. The probe asks Unleashed for one unfiltered page and counts products with images, which is a direct test of the only thing in doubt: whether the feed is serving image data at all. One request, only on runs that saw an empty list. A probe that throws is not confirmation — it removes nothing and says so.
+- The webhook path never corroborates — one delivery says nothing about the feed — and leaves image-less products to the next scheduled run. `syncByProductCode` does, so `--sku <CODE>` is the way to clear one by hand.
+- `EMPTY_IMAGES_MAX_PER_RUN` (200) caps how many image-less products one run checks against Shopify. Holding them back instead of skipping them means each now costs a `findProductsBySku` plus a `getProduct`, and on live windows every product in the run has no images — trivial over ten minutes, but `--all` walks thousands and would have spent its whole timeout confirming that products with no pictures still have none. What the cap drops is logged, and the next run takes it.
+- `warnOnTruncation` on `iterateProducts`, off for the corroboration probe. Caught on the live deployment: the probe reads one page deliberately, and `iterateProducts` reported that as `Unleashed has 33 pages; this run stops at page 1. Continue with --start-page 2` — a truncated-sync warning, in every run that probes, for a run that was not truncated. Stopping short is news for a reconcile and not for a sampler.
+
+### Notes
+- `withImages` in the run report now counts products that actually had images rather than the size of `results`, which image-less products can now enter.
+- Deployed 2026-08-21. `func` Core Tools is not installed here, so the package went to the `function-releases` container and `WEBSITE_RUN_FROM_PACKAGE` was pointed at it with a read SAS by hand; that path is now written up in the README under "Deploying without Core Tools". Verified live in Application Insights — the 01:30 run logged `1 product(s) list no images; 163 of 200 product(s) in a catalogue probe carry images (1 in this run's own window), so the feed is sound`: the window was short of the threshold, the probe supplied the evidence, and the image-less product was checked rather than skipped.
+
 ## 2026-08-11
 
 ### Fixed

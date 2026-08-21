@@ -43,7 +43,9 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
   const unmatched = byOutcome[SYNC_OUTCOME.UNMATCHED] ?? 0;
   const ambiguous = byOutcome[SYNC_OUTCOME.AMBIGUOUS] ?? 0;
   const capped = byOutcome[SYNC_OUTCOME.CAPPED] ?? 0;
+  const retained = byOutcome[SYNC_OUTCOME.RETAINED] ?? 0;
   const settled = byOutcome[SYNC_OUTCOME.UNCHANGED] ?? 0;
+  const removalEnabled = Boolean(report?.removalEnabled);
   // Zeroes, not undefined: the row must read `0` rather than vanish, so a healthy
   // report positively confirms the check ran.
   const duplicates = {
@@ -113,6 +115,34 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
     );
   }
 
+  // An image someone deleted in Unleashed that is still on the website. What it
+  // means depends entirely on whether removal is switched on.
+  //
+  // On: the sync tried to take it off and the write did not take — a fault, and
+  // WARN not ALERT, because the page is wrong rather than the sync being blind.
+  // Off: this is the documented steady state, so it is listed and counted but
+  // never moves the verdict — warning daily on a setting nobody intends to
+  // change is how a report earns an inbox filter.
+  if (retained > 0) {
+    if (removalEnabled) {
+      if (health === SYNC_HEALTH.OK) {
+        health = SYNC_HEALTH.WARN;
+        headline = `${retained} deleted image(s) still on the website`;
+      }
+      reasons.push(
+        `${retained} product(s) still show an image that was deleted in Unleashed, even though ` +
+          'removal is on — the detach did not take. Check the token still carries `write_files`, ' +
+          'then re-run those product codes with `node scripts/sync-cli.js --sku <code>`.',
+      );
+    } else {
+      reasons.push(
+        `${retained} product(s) show an image that was deleted in Unleashed. Expected: ` +
+          '`DELETE_REMOVED_MEDIA` is off, so the sync leaves it in place. Delete it in Shopify, ' +
+          'or turn the setting on.',
+      );
+    }
+  }
+
   // Nothing changed in Unleashed at all. Only a fault if a much wider window is
   // empty too — see ZERO_ACTIVITY_PROBE_DAYS for why a quiet day is not news.
   if (scanned === 0) {
@@ -142,6 +172,7 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
     ['Failed', failed],
     ['Unmatched SKUs', ambiguous ? `${unmatched} (+${ambiguous} ambiguous)` : unmatched],
     ['Declined by the image cap', capped],
+    ['Deleted in Unleashed, still on Shopify', retained],
     [
       'Duplicated pictures',
       duplicates.groups === 0
@@ -168,6 +199,7 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
       unmatched,
       ambiguous,
       capped,
+      retained,
       duplicates: duplicates.groups,
       foreignDuplicates: duplicates.foreignGroups,
     },

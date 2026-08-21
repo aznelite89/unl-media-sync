@@ -153,13 +153,20 @@ export function createUnleashedClient(config, log = console) {
    * the next 9–16, and so on, without repeating work. Page numbering is stable
    * for a given `pageSize` and filter.
    *
-   * @param {{ sinceIso?: string, pageSize?: number, maxPages?: number, startPage?: number }} options
+   * `warnOnTruncation` exists for callers that mean to read one page. Stopping
+   * short is news for a reconcile — work was left undone — but not for a sampler
+   * like the empty-image corroboration probe, which asks for a single page on
+   * purpose. Warning there puts "this run stops at page 1" in the log of every
+   * run that probes, which reads as a truncated sync and is not one.
+   *
+   * @param {{ sinceIso?: string, pageSize?: number, maxPages?: number, startPage?: number, warnOnTruncation?: boolean }} options
    */
   async function* iterateProducts({
     sinceIso,
     pageSize = UNLEASHED_PAGE_SIZE,
     maxPages = RECONCILE_MAX_PAGES,
     startPage = UNLEASHED_FIRST_PAGE,
+    warnOnTruncation = true,
   } = {}) {
     let pageNumber = Math.max(UNLEASHED_FIRST_PAGE, startPage);
     const endPage = pageNumber + maxPages - 1;
@@ -191,7 +198,7 @@ export function createUnleashedClient(config, log = console) {
 
       yield { items, pageNumber, totalPages };
 
-      if (totalPages > endPage && pageNumber === endPage) {
+      if (warnOnTruncation && totalPages > endPage && pageNumber === endPage) {
         log.warn?.(
           `Unleashed has ${totalPages} pages; this run stops at page ${endPage}. ` +
             `Continue with --start-page ${endPage + 1}, or raise RECONCILE_MAX_PAGES.`,

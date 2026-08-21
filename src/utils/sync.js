@@ -209,6 +209,13 @@ export async function syncUnleashedProduct({
   // client; fingerprinting reads Unleashed's CDN directly, so it comes in the
   // same way rather than reaching for a global.
   fetchImpl = fetch,
+  /**
+   * Whether the caller has corroborated that an empty `Images[]` is real rather
+   * than a fault. Only `reconcile` can — it sees a whole run — so this defaults
+   * to false and the webhook path leaves image-less products to the next
+   * scheduled pass. See EMPTY_IMAGES_CORROBORATION_MIN.
+   */
+  emptyImagesConfirmed = false,
 }) {
   const productCode = String(unleashedProduct?.ProductCode ?? '').trim();
   const result = {
@@ -226,6 +233,8 @@ export async function syncUnleashedProduct({
     /** Pictures found more than once on this product. Reported, never acted on. */
     duplicates: null,
     detached: [],
+    /** Media Unleashed dropped that is still on the page — see SYNC_OUTCOME.RETAINED. */
+    retained: [],
     reordered: false,
     notes: [],
   };
@@ -243,9 +252,22 @@ export async function syncUnleashedProduct({
     );
   }
 
-  if (desired.length === 0) {
+  if (desired.length === 0 && !emptyImagesConfirmed) {
+    // Unleashed lists no images, and nothing has corroborated that. Returning
+    // here is the safe default: an API fault that strips `Images[]` reads
+    // exactly like a deliberate deletion from inside one product, and acting on
+    // the wrong one takes every picture off a live product. The caller decides
+    // — see EMPTY_IMAGES_CORROBORATION_MIN — and the next run asks again.
     result.outcome = SYNC_OUTCOME.NO_IMAGES;
     return result;
+  }
+  if (desired.length === 0) {
+    // Corroborated: the run saw plenty of other products still carrying images,
+    // so this one is empty on purpose. Fall through and let the ordinary plan
+    // handle it — every existing guard still applies, so only media this code
+    // owns, that no sibling still points at, is a candidate, and it comes off
+    // only with DELETE_REMOVED_MEDIA on.
+    result.notes.push('Unleashed lists no images for this product');
   }
 
   const { products } = await shopify.findProductsBySku(productCode);
@@ -362,6 +384,10 @@ export async function syncUnleashedProduct({
     result.notes.push(
       `${plan.toDetach.length} previously synced image(s) no longer in Unleashed, left in place (DELETE_REMOVED_MEDIA is off)`,
     );
+    log.warn?.(
+      `${productCode}: ${plan.toDetach.length} image(s) removed in Unleashed are still on ` +
+        `${shopifyProductId} — DELETE_REMOVED_MEDIA is off`,
+    );
   }
 
   // Reordering is skipped when hand-added media is present: forcing Unleashed's
@@ -393,9 +419,16 @@ export async function syncUnleashedProduct({
   const hasWork = plan.toUpload.length > 0 || willDetach.length > 0;
   if (!hasWork && !reorderNeededNow) {
     // A product blocked entirely by the cap must not report as `unchanged`,
-    // or reports that drop `unchanged` rows will hide the skipped images.
-    result.outcome =
-      plan.skippedForCap.length > 0 ? SYNC_OUTCOME.CAPPED : SYNC_OUTCOME.UNCHANGED;
+    // or reports that drop `unchanged` rows will hide the skipped images. The
+    // same applies to an image Unleashed dropped that is still on the page:
+    // `unchanged` is exactly what it looks like from here, and exactly what
+    // stops anyone being told.
+    result.outcome = reportableOutcome({
+      skippedForCap: plan.skippedForCap.length,
+      retained: plan.toDetach.length,
+      changed: false,
+    });
+    result.retained = plan.toDetach.map((entry) => entry.mediaId);
     result.adopted = plan.resolved
       .filter((entry) => ADOPTED_ORIGINS.includes(entry.origin))
       .map((entry) => entry.mediaId);
@@ -510,6 +543,7 @@ export async function syncUnleashedProduct({
   // threw — is still on the page, so it keeps its ownership record.
   const detachedIds = new Set(result.detached);
   const stillOnPage = plan.toDetach.filter((entry) => !detachedIds.has(entry.mediaId));
+  result.retained = stillOnPage.map((entry) => entry.mediaId);
 
   await shopify.saveState({
     productId: shopifyProductId,
@@ -525,8 +559,32 @@ export async function syncUnleashedProduct({
   result.adopted = entries
     .filter((entry) => ADOPTED_ORIGINS.includes(entry.origin))
     .map((entry) => entry.mediaId);
-  result.outcome = SYNC_OUTCOME.SYNCED;
+  // `synced` is filtered out of the daily report just as `unchanged` is, so a
+  // run that uploaded the new image but could not take the old one off would
+  // otherwise report as a clean success.
+  result.outcome = reportableOutcome({
+    skippedForCap: plan.skippedForCap.length,
+    retained: stillOnPage.length,
+    changed: true,
+  });
   return result;
+}
+
+/**
+ * The outcome a product's report row carries.
+ *
+ * `synced` and `unchanged` are both dropped from the daily report as noise, so
+ * anything still outstanding on an otherwise successful product has to be said
+ * through the outcome itself or it is never said at all. Severity order: an
+ * image that should have come off and did not outranks one the cap declined,
+ * because the first means a write did not take and the second is a data fact.
+ *
+ * @param {{ skippedForCap: number, retained: number, changed: boolean }} input
+ */
+function reportableOutcome({ skippedForCap, retained, changed }) {
+  if (retained > 0) return SYNC_OUTCOME.RETAINED;
+  if (skippedForCap > 0) return SYNC_OUTCOME.CAPPED;
+  return changed ? SYNC_OUTCOME.SYNCED : SYNC_OUTCOME.UNCHANGED;
 }
 
 /**

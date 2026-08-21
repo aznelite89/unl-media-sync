@@ -101,6 +101,15 @@ export const SYNC_OUTCOME = {
    * truncated run look clean.
    */
   CAPPED: 'capped',
+  /**
+   * An image Unleashed no longer lists is still on the Shopify product, because
+   * `DELETE_REMOVED_MEDIA` is off or the detach call threw. Distinct from
+   * `synced` and `unchanged` for the same reason `capped` is: both are filtered
+   * out of the daily report as noise, so a product carrying only this note would
+   * never reach anyone. Someone deleting an image in Unleashed and watching it
+   * stay on the website is the whole point of saying so.
+   */
+  RETAINED: 'retained',
   /** Would have changed something, but DRY_RUN is on. */
   DRY_RUN: 'dry_run',
   FAILED: 'failed',
@@ -111,14 +120,17 @@ export const SYNC_OUTCOME = {
  *
  * `unmatched` and `capped` are in this list even though they never alert: the
  * counts alone prompted "which SKUs?" every time, and the answer was only ever
- * in the logs. Ordering is severity, so a truncated inline list still leads with
- * the things that need doing rather than the steady-state data facts.
+ * in the logs. `retained` is here for the same reason, and does warn — but only
+ * when removal is switched on, because only then does it mean a write failed.
+ * Ordering is severity, so a truncated inline list still leads with the things
+ * that need doing rather than the steady-state data facts.
  */
 export const DAILY_REPORTED_OUTCOMES = [
   SYNC_OUTCOME.FAILED,
   SYNC_OUTCOME.DRY_RUN,
   SYNC_OUTCOME.AMBIGUOUS,
   SYNC_OUTCOME.UNMATCHED,
+  SYNC_OUTCOME.RETAINED,
   SYNC_OUTCOME.CAPPED,
 ];
 
@@ -129,6 +141,7 @@ export const OUTCOME_LABEL = {
   [SYNC_OUTCOME.AMBIGUOUS]: 'ambiguous SKU',
   [SYNC_OUTCOME.UNMATCHED]: 'unmatched SKU',
   [SYNC_OUTCOME.CAPPED]: 'declined by the image cap',
+  [SYNC_OUTCOME.RETAINED]: 'deleted in Unleashed, still on Shopify',
   [SYNC_OUTCOME.SYNCED]: 'synced',
   [SYNC_OUTCOME.UNCHANGED]: 'already correct',
   [SYNC_OUTCOME.NO_IMAGES]: 'no images',
@@ -269,6 +282,40 @@ export const MEDIA_PAGE_SIZE = 100;
 
 /** Guard against a runaway reconcile run. */
 export const RECONCILE_MAX_PAGES = 25;
+
+/**
+ * How many products must be seen still carrying images before an empty
+ * `Images[]` is believed and acted on.
+ *
+ * A product whose Unleashed image list has dropped to zero is the one case where
+ * "Unleashed says so" is not enough on its own: a fault that returns products
+ * with their images stripped is indistinguishable, per product, from somebody
+ * deliberately deleting the last photo — and acting on the wrong one takes every
+ * picture off a live product. What has to be established is narrow and checkable:
+ * that the feed is serving image data at all.
+ *
+ * Counted first from the run's own window, and — because a ten-minute window
+ * usually holds nothing with photos — then from a one-page catalogue probe. See
+ * `corroborateEmptyImages`. Failing both, nothing is touched, which is the
+ * pre-2026-08-21 behaviour.
+ */
+export const EMPTY_IMAGES_CORROBORATION_MIN = 5;
+
+/**
+ * Ceiling on how many image-less products one run will check against Shopify.
+ *
+ * Most of the catalogue has no photographs and never did, so most of these
+ * lookups find nothing to do — on live windows it is routinely every product in
+ * the run. A ten-minute window makes that a couple of dozen products and the
+ * cost is trivial, but `--all` walks thousands, and two Shopify calls apiece
+ * would spend the whole function timeout confirming that products with no
+ * pictures still have no pictures.
+ *
+ * The cap keeps the ordinary path uncapped in practice while stopping a
+ * catalogue-wide pass from starving the work that matters. What it drops is
+ * logged, never silent, and the next run picks them up.
+ */
+export const EMPTY_IMAGES_MAX_PER_RUN = 200;
 
 /**
  * Bytes read from the head of an Unleashed image to fingerprint it.

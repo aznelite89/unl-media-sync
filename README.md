@@ -88,6 +88,51 @@ Because a sibling's copy can now be claimed, **one media item can be referenced 
 codes' state entries**. Removal accounts for that: a code that drops an image never detaches media
 another code still points at, or the photograph would vanish for every variant still using it.
 
+### The last image
+
+Deleting the *last* image a product has is a different problem from deleting one of several.
+`syncUnleashedProduct` used to return `no_images` **before its first Shopify call**, so nothing
+happened at all: no detach even with `DELETE_REMOVED_MEDIA=true`, no state rewrite, no note, and
+`no_images` is not a reported outcome. The picture stayed on the website in silence.
+
+It cannot simply act on an empty `Images[]`, because a transient Unleashed fault returning products
+with their images stripped is, from inside one product, indistinguishable from a deliberate
+deletion — and getting it wrong takes *every* photograph off a live product. So the decision is
+made from the run, not the product:
+
+1. Products with no images are **held back** during the walk rather than skipped.
+2. When the walk ends, the run checks its own evidence: did at least
+   `EMPTY_IMAGES_CORROBORATION_MIN` (5) **other** products come back carrying images? If so the
+   feed is demonstrably returning image data, and the empty ones are empty on purpose.
+3. Usually it did not — a ten-minute window routinely holds a couple of dozen products and none
+   with photos (a live pass: 35 scanned, 4 with images; the next, 26 scanned, 0). Waiting for the
+   window to corroborate would mean never removing anything, because a product that is not
+   modified again drops out of the window and stops being visited at all. So the run asks the
+   catalogue directly instead: **one unfiltered page**, no `modifiedSince`. Products carrying
+   images there prove Unleashed is serving image data right now, which is the only thing that
+   needs proving. One extra request, only on runs that saw an empty list.
+4. Only then are they synced, and only through the ordinary plan — so every existing guard still
+   applies. Media a sibling code still points at is not touched, media this service never added is
+   not touched, and nothing comes off unless `DELETE_REMOVED_MEDIA` is on.
+5. At most `EMPTY_IMAGES_MAX_PER_RUN` (200) image-less products are checked against Shopify in one
+   run. Most of the catalogue has no photographs and never did, so most of these lookups find
+   nothing to do; a ten-minute window never comes close to the cap, but `--all` walks thousands and
+   two Shopify calls apiece would spend the whole function timeout. What the cap drops is logged
+   and picked up by the next run.
+6. If neither the window nor the probe can vouch for the feed — including when the probe itself
+   throws — nothing is touched and the run says so in the log. A probe that cannot be taken is
+   never read as confirmation.
+
+The webhook path never corroborates — one delivery is not evidence about the feed — and leaves
+image-less products to the next scheduled pass. `--sku` **does**: a person naming one product code
+is the corroboration, which makes
+
+```bash
+node scripts/sync-cli.js --sku <CODE>
+```
+
+the way to clear a product whose last image was deleted.
+
 ### The duplicate watch
 
 A second writer putting its own copy of a photograph on a product is invisible from inside this
@@ -140,8 +185,13 @@ Nothing is deleted — `fileUpdate` removes the reference, and the file stays in
 
 - **Media this service did not add is never removed, detached or replaced.** Only entries in
   `custom.unleashed_media` are ever candidates for removal.
-- Removal additionally requires `DELETE_REMOVED_MEDIA=true` (**off by default**). When off, an
-  image dropped in Unleashed stays in Shopify and is reported.
+- Removal additionally requires `DELETE_REMOVED_MEDIA=true` (**off by default in code; on in
+  production since 2026-08-21**). When off, an image dropped in Unleashed stays in Shopify.
+- Either way the product reports as `retained` — deliberately not `synced` or `unchanged`, both of
+  which the daily report drops as noise. That filter is why a deleted image could sit on the live
+  site unnoticed: the note explaining it existed, and nothing carried it to anyone.
+- **A product whose Unleashed image list drops to zero is only acted on once the run corroborates
+  that the feed is sound.** See [The last image](#the-last-image).
 - Removal **detaches** the file from the product (`fileUpdate` + `referencesToRemove`); it does
   not delete the file from Files.
 - Reordering is **skipped** when the product has any media this service didn't add, so a hero
@@ -259,6 +309,37 @@ az functionapp config appsettings set -g $RG -n $APP --settings \
 
 func azure functionapp publish $APP
 ```
+
+### Deploying without Core Tools
+
+`func azure functionapp publish` is the supported path and does the right thing. If Core Tools is
+not installed, the same result is reachable with `az` alone — `func` only uploads a package and
+points the app at it. Note that `az functionapp deployment source config-zip` is **not** an option
+here: SCM basic publishing credentials are disabled on this app, so Kudu ZipDeploy returns 401 and
+Azure records no deployment at all.
+
+```bash
+# Package: exactly host.json, package.json, package-lock.json, src/ and node_modules/ at the root.
+# No scripts/, no dotfiles — the deployed package carries 163 entries.
+NAME="$(date -u +%Y%m%d%H%M%S)-$(uuidgen | tr 'A-Z' 'a-z').zip"
+KEY=$(az storage account keys list -g $RG -n $STORAGE --query "[0].value" -o tsv)
+
+az storage blob upload --account-name $STORAGE --account-key "$KEY" \
+  -c function-releases -n "$NAME" -f "$NAME"
+
+SAS=$(az storage blob generate-sas --account-name $STORAGE --account-key "$KEY" \
+  -c function-releases -n "$NAME" --permissions r --expiry 2036-08-21T00:00:00Z --https-only -o tsv)
+
+# Read the blob through the SAS BEFORE pointing the app at it. A bad URL here is a
+# dead app, and the host reports it only as a short function list.
+curl -s -o /dev/null -w '%{http_code}\n' -r 0-1 "https://$STORAGE.blob.core.windows.net/function-releases/$NAME?$SAS"
+
+az functionapp config appsettings set -g $RG -n $APP \
+  --settings "WEBSITE_RUN_FROM_PACKAGE=https://$STORAGE.blob.core.windows.net/function-releases/$NAME?$SAS"
+```
+
+Confirm it took: `az functionapp function list -g $RG -n $APP --query "length(@)"` must report **6**,
+and Application Insights should show the next `reconcileMedia` run within 10 minutes.
 
 Secrets belong in app settings (or Key Vault references) — never in the repo, and never in
 anything the theme renders.
@@ -389,7 +470,9 @@ Deliveries older than 5 minutes are rejected.
 |---|---|---|
 | `MAX_SYNCED_IMAGES` | `5` | ceiling on images pushed per Unleashed product |
 | `MAX_MEDIA_PER_PRODUCT` | `5` | ceiling on TOTAL images on one Shopify product, counting media the sync did not add. Uploads beyond it are skipped and reported; nothing is ever removed to make room |
-| `DELETE_REMOVED_MEDIA` | `false` | detach media this service added once Unleashed no longer lists it |
+| `DELETE_REMOVED_MEDIA` | `false` | detach media this service added once Unleashed no longer lists it. **Live setting is `true`** — the code default stays `false` so a fresh deployment never removes anything before its metafields are trusted |
+| `EMPTY_IMAGES_CORROBORATION_MIN` | `5` | products in one run that must still carry images before an empty `Images[]` is believed and acted on. Compile-time constant, not an app setting — see [The last image](#the-last-image) |
+| `EMPTY_IMAGES_MAX_PER_RUN` | `200` | image-less products checked against Shopify in one run. Compile-time constant. Keeps `--all` from spending its timeout confirming that products with no pictures still have none |
 | `REORDER_MEDIA` | `true` | order synced media default-first (skipped if manual media is present) |
 | `DRY_RUN` | `false` | log the plan, change nothing |
 | `RECONCILE_LOOKBACK_MINUTES` | `60` | timer window |
@@ -409,7 +492,8 @@ Deliveries older than 5 minutes are rejected.
 3. `--all` for the catalogue backfill, `DELETE_REMOVED_MEDIA=false` throughout.
 4. Deploy, register the webhook, confirm the timer in Application Insights.
 5. Only then consider `DELETE_REMOVED_MEDIA=true`, once the `custom.unleashed_media` metafields
-   are populated and trusted.
+   are populated and trusted. **Done on this store 2026-08-21**, after the 11 Aug cleanup verified
+   all 3,399 products clean.
 
 ## Known limits
 

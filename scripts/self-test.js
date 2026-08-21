@@ -6,7 +6,10 @@
 import assert from 'node:assert/strict';
 
 import {
+  DAILY_REPORTED_OUTCOMES,
   DUPLICATE_KIND,
+  EMPTY_IMAGES_CORROBORATION_MIN,
+  EMPTY_IMAGES_MAX_PER_RUN,
   MEDIA_ORIGIN,
   MEDIA_STATUS,
   STATE_VERSION,
@@ -495,6 +498,229 @@ test('no cap supplied means no cap applied', () => {
   });
   assert.equal(plan.toUpload.length, 3);
   assert.equal(plan.skippedForCap.length, 0);
+});
+
+// A product whose Unleashed image list lost one entry and kept another. The
+// kept image is what keeps this out of the `no_images` early return, which is a
+// separate case with its own hazard — see the note in `syncUnleashedProduct`.
+const RETAINED_OLD = 'gid://shopify/MediaImage/OLD';
+const RETAINED_KEEP = 'gid://shopify/MediaImage/KEEP';
+
+const RETAINED_MEDIA = [
+  {
+    id: RETAINED_OLD,
+    status: MEDIA_STATUS.READY,
+    image: { url: 'https://cdn.shopify.com/s/files/1/x/files/old-photo.png?v=1' },
+  },
+  {
+    id: RETAINED_KEEP,
+    status: MEDIA_STATUS.READY,
+    image: { url: 'https://cdn.shopify.com/s/files/1/x/files/keep-photo.png?v=1' },
+  },
+];
+
+const RETAINED_STATE = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: 'https://unl/old-photo.png',
+      mediaId: RETAINED_OLD,
+      origin: MEDIA_ORIGIN.SYNCED,
+      isDefault: false,
+      productCode: 'DELETED-1',
+    },
+    {
+      url: 'https://unl/keep-photo.png',
+      mediaId: RETAINED_KEEP,
+      origin: MEDIA_ORIGIN.SYNCED,
+      isDefault: true,
+      productCode: 'DELETED-1',
+    },
+  ],
+};
+
+/** Unleashed after somebody deleted `old-photo` and left `keep-photo` alone. */
+const RETAINED_PRODUCT = {
+  ProductCode: 'DELETED-1',
+  Guid: 'g',
+  Images: [{ Url: 'https://unl/keep-photo.png', IsDefault: true }],
+};
+
+const retainedShopify = (overrides = {}) => ({
+  findProductsBySku: async () => ({
+    products: [{ id: 'gid://shopify/Product/1', title: 'P' }],
+    variantIds: [],
+  }),
+  getProduct: async () => ({
+    id: 'gid://shopify/Product/1',
+    title: 'P',
+    media: RETAINED_MEDIA,
+    stateMetafield: { value: JSON.stringify(RETAINED_STATE) },
+  }),
+  appendImage: async () => assert.fail('the kept image is already tracked'),
+  detachMedia: async () => [],
+  reorderMedia: async () => null,
+  saveState: async () => [],
+  ...overrides,
+});
+
+const RETAINED_CONFIG = (deleteRemovedMedia) => ({
+  maxSyncedImages: 5,
+  maxMediaPerProduct: 5,
+  deleteRemovedMedia,
+  reorderMedia: true,
+  dryRun: false,
+});
+
+test('an image deleted in Unleashed and left on the page reports as RETAINED, never as unchanged', async () => {
+  // The gap this closes: with removal off the sync has no work to do, so the
+  // product reported `unchanged` — which `details` drops as noise — and the note
+  // explaining that a deleted image is still live reached nobody. Someone had to
+  // notice it on the website instead.
+  const result = await syncUnleashedProduct({
+    unleashedProduct: RETAINED_PRODUCT,
+    shopify: retainedShopify({
+      detachMedia: async () => assert.fail('removal is off'),
+    }),
+    config: RETAINED_CONFIG(false),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.outcome, SYNC_OUTCOME.RETAINED);
+  assert.deepEqual(result.retained, [RETAINED_OLD]);
+  assert.deepEqual(result.detached, []);
+  assert.ok(
+    result.notes.some((n) => n.includes('no longer in Unleashed')),
+    'the report row must explain itself',
+  );
+  assert.ok(DAILY_REPORTED_OUTCOMES.includes(result.outcome), 'and must survive the report filter');
+});
+
+test('a detach that throws reports as RETAINED, not as a clean sync', async () => {
+  // Removal on and the write refused — ACCESS_DENIED when the token is missing
+  // `write_files` is the case that matters. `synced` is filtered out of the
+  // daily report exactly as `unchanged` is, so this would have looked fine.
+  const result = await syncUnleashedProduct({
+    unleashedProduct: RETAINED_PRODUCT,
+    shopify: retainedShopify({
+      detachMedia: async () => {
+        throw new Error('ACCESS_DENIED');
+      },
+    }),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.outcome, SYNC_OUTCOME.RETAINED);
+  assert.deepEqual(result.detached, [], 'nothing came off');
+  assert.deepEqual(result.retained, [RETAINED_OLD]);
+});
+
+test('a detach that succeeds is a plain sync, with nothing retained', async () => {
+  let detached = null;
+  const result = await syncUnleashedProduct({
+    unleashedProduct: RETAINED_PRODUCT,
+    shopify: retainedShopify({
+      detachMedia: async ({ mediaIds }) => {
+        detached = mediaIds;
+        return [];
+      },
+    }),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.deepEqual(detached, [RETAINED_OLD], 'only the dropped image');
+  assert.equal(result.outcome, SYNC_OUTCOME.SYNCED);
+  assert.deepEqual(result.retained, []);
+});
+
+// --- the last image ----------------------------------------------------------
+//
+// Deleting the last image a product has is the one deletion the sync used to be
+// blind to: it returned `no_images` before its first Shopify call, so the
+// picture stayed on the website however removal was configured. Acting on an
+// empty `Images[]` is only safe once the run has shown the feed is sound.
+
+const LAST_IMAGE_STATE = {
+  version: STATE_VERSION,
+  managed: [
+    {
+      url: 'https://unl/only-photo.png',
+      mediaId: RETAINED_OLD,
+      origin: MEDIA_ORIGIN.SYNCED,
+      isDefault: true,
+      productCode: 'LAST-1',
+    },
+  ],
+};
+
+const lastImageShopify = (detachedOut) => ({
+  findProductsBySku: async () => ({
+    products: [{ id: 'gid://shopify/Product/1', title: 'P' }],
+    variantIds: [],
+  }),
+  getProduct: async () => ({
+    id: 'gid://shopify/Product/1',
+    title: 'P',
+    media: [RETAINED_MEDIA[0]],
+    stateMetafield: { value: JSON.stringify(LAST_IMAGE_STATE) },
+  }),
+  appendImage: async () => assert.fail('there is nothing to upload'),
+  detachMedia: async ({ mediaIds }) => {
+    detachedOut.push(...mediaIds);
+    return [];
+  },
+  reorderMedia: async () => null,
+  saveState: async () => [],
+});
+
+const LAST_IMAGE_PRODUCT = { ProductCode: 'LAST-1', Guid: 'g', Images: [] };
+
+test('an uncorroborated empty image list is never acted on', async () => {
+  // The safe default, and the whole reason this is not just a deleted branch:
+  // an Unleashed fault that strips Images[] must not cost a product its photos.
+  const detached = [];
+  const result = await syncUnleashedProduct({
+    unleashedProduct: LAST_IMAGE_PRODUCT,
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.outcome, SYNC_OUTCOME.NO_IMAGES);
+  assert.deepEqual(detached, [], 'nothing came off on an unconfirmed empty list');
+});
+
+test('a corroborated empty image list removes the last image', async () => {
+  const detached = [];
+  const result = await syncUnleashedProduct({
+    unleashedProduct: LAST_IMAGE_PRODUCT,
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+    emptyImagesConfirmed: true,
+  });
+
+  assert.deepEqual(detached, [RETAINED_OLD]);
+  assert.equal(result.outcome, SYNC_OUTCOME.SYNCED);
+  assert.deepEqual(result.retained, []);
+});
+
+test('a corroborated empty image list still respects DELETE_REMOVED_MEDIA', async () => {
+  // Confirmation says the empty list is real. It does not say removal is on.
+  const detached = [];
+  const result = await syncUnleashedProduct({
+    unleashedProduct: LAST_IMAGE_PRODUCT,
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(false),
+    log: { info() {}, warn() {}, error() {} },
+    emptyImagesConfirmed: true,
+  });
+
+  assert.deepEqual(detached, [], 'removal is off');
+  assert.equal(result.outcome, SYNC_OUTCOME.RETAINED, 'and now it says so');
+  assert.deepEqual(result.retained, [RETAINED_OLD]);
 });
 
 test('a product blocked entirely by the cap reports as CAPPED, never as unchanged', async () => {
@@ -1233,6 +1459,154 @@ test('a duplicate on an UNCHANGED product still reaches the report', async () =>
   assert.equal(report.duplicates.groups, 1, 'but its duplicate is still reported');
 });
 
+test('a run that saw plenty of images acts on the products that have none', async () => {
+  // The corroboration: five other products came back carrying images, so the
+  // feed is returning image data and LAST-1 is empty because somebody emptied it.
+  const detached = [];
+  const withImages = Array.from({ length: EMPTY_IMAGES_CORROBORATION_MIN }, (_, i) => ({
+    ProductCode: `HAS-${i}`,
+    Guid: `g${i}`,
+    Images: [{ Url: 'https://unl/only-photo.png', IsDefault: true }],
+  }));
+
+  const report = await reconcile({
+    unleashed: unleashedStub([...withImages, LAST_IMAGE_PRODUCT]),
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.deepEqual(detached, [RETAINED_OLD], 'the last image came off');
+  assert.equal(report.scanned, EMPTY_IMAGES_CORROBORATION_MIN + 1);
+  assert.equal(report.withImages, EMPTY_IMAGES_CORROBORATION_MIN, 'counts images, not results');
+});
+
+test('a quiet window falls back to a catalogue probe rather than waiting forever', async () => {
+  // A ten-minute window routinely holds nothing with photos, so the run's own
+  // evidence is usually absent. Without this fallback a deleted last image would
+  // sit on the site until the product aged out of the window and stopped being
+  // visited at all — never removed, and never reported either.
+  const detached = [];
+  let probes = 0;
+  const unleashed = {
+    async *iterateProducts({ sinceIso } = {}) {
+      if (sinceIso) {
+        yield { items: [LAST_IMAGE_PRODUCT], pageNumber: 1, totalPages: 1 };
+        return;
+      }
+      // The probe: unfiltered, and the catalogue plainly still has photographs.
+      probes += 1;
+      yield {
+        items: Array.from({ length: EMPTY_IMAGES_CORROBORATION_MIN }, (_, i) => ({
+          ProductCode: `ANY-${i}`,
+          Images: [{ Url: 'https://unl/x.png', IsDefault: true }],
+        })),
+        pageNumber: 1,
+        totalPages: 1,
+      };
+    },
+  };
+
+  await reconcile({
+    sinceIso: '2026-08-21T00:00:00',
+    unleashed,
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(probes, 1, 'exactly one probe, and only because the window was quiet');
+  assert.deepEqual(detached, [RETAINED_OLD], 'the last image came off on the probe’s evidence');
+});
+
+test('a catalogue-wide pass caps its image-less lookups and says what it dropped', async () => {
+  // `--all` walks thousands of products, most of them without photographs. Two
+  // Shopify calls each would spend the whole function timeout confirming that
+  // products with no pictures still have no pictures.
+  const looked = [];
+  const empties = Array.from({ length: EMPTY_IMAGES_MAX_PER_RUN + 25 }, (_, i) => ({
+    ProductCode: `EMPTY-${i}`,
+    Guid: `e${i}`,
+    Images: [],
+  }));
+  const withImages = Array.from({ length: EMPTY_IMAGES_CORROBORATION_MIN }, (_, i) => ({
+    ProductCode: `HAS-${i}`,
+    Guid: `h${i}`,
+    Images: [{ Url: 'https://unl/only-photo.png', IsDefault: true }],
+  }));
+
+  const warnings = [];
+  await reconcile({
+    unleashed: unleashedStub([...withImages, ...empties]),
+    shopify: {
+      ...lastImageShopify([]),
+      findProductsBySku: async () => {
+        looked.push(1);
+        return { products: [], variantIds: [] };
+      },
+    },
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn: (m) => warnings.push(m), error() {} },
+  });
+
+  assert.equal(
+    looked.length,
+    EMPTY_IMAGES_CORROBORATION_MIN + EMPTY_IMAGES_MAX_PER_RUN,
+    'the products with images, plus the cap — not all 225 empties',
+  );
+  assert.ok(
+    warnings.some((w) => w.includes('left for the next one')),
+    'a run that stopped short must never look like a clean sweep',
+  );
+});
+
+test('a catalogue probe that fails removes nothing', async () => {
+  // An unreachable feed is not evidence that a product has no images.
+  const detached = [];
+  const unleashed = {
+    async *iterateProducts({ sinceIso } = {}) {
+      if (sinceIso) {
+        yield { items: [LAST_IMAGE_PRODUCT], pageNumber: 1, totalPages: 1 };
+        return;
+      }
+      throw new Error('Unleashed 503');
+    },
+  };
+
+  const warnings = [];
+  await reconcile({
+    sinceIso: '2026-08-21T00:00:00',
+    unleashed,
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn: (m) => warnings.push(m), error() {} },
+  });
+
+  assert.deepEqual(detached, [], 'a failed probe must never be read as confirmation');
+  assert.ok(warnings.some((w) => w.includes('probe failed')));
+});
+
+test('a run with too little evidence leaves image-less products alone', async () => {
+  // Indistinguishable from Unleashed returning products with their images
+  // stripped. Costs nothing to wait: the next run is ten minutes away and the
+  // window overlaps.
+  const detached = [];
+  const warnings = [];
+  const report = await reconcile({
+    unleashed: unleashedStub([LAST_IMAGE_PRODUCT]),
+    shopify: lastImageShopify(detached),
+    config: RETAINED_CONFIG(true),
+    log: { info() {}, warn: (m) => warnings.push(m), error() {} },
+  });
+
+  assert.deepEqual(detached, [], 'nothing was removed on one product’s word alone');
+  assert.equal(report.details.length, 0);
+  assert.ok(
+    warnings.some((w) => w.includes('not enough to rule out')),
+    'and the run says why it held back',
+  );
+});
+
 test('the whole-store sweep stops on its own budget rather than being killed', async () => {
   let pages = 0;
   const shopify = {
@@ -1408,6 +1782,25 @@ test('unmatched and capped are reported but never alert', () => {
   assert.equal(s.counts.unmatched, 185);
   assert.equal(s.counts.capped, 273);
   assert.ok(s.text.includes('185'));
+});
+
+test('a deleted image left on the page warns only when removal is meant to happen', () => {
+  // Off is the documented steady state — say it, do not warn about it, or the
+  // report earns an inbox filter. On means a write did not take, which is news.
+  const off = summaryOf({ unchanged: 40, retained: 2 }, { removalEnabled: false });
+  assert.equal(off.health, SYNC_HEALTH.OK);
+  assert.equal(off.counts.retained, 2);
+  assert.ok(off.text.includes('DELETE_REMOVED_MEDIA'), 'says why it is still there');
+
+  const on = summaryOf({ unchanged: 40, retained: 2 }, { removalEnabled: true });
+  assert.equal(on.health, SYNC_HEALTH.WARN);
+  assert.ok(on.text.includes('did not take'), 'names the fault');
+  assert.ok(on.text.includes('write_files'), 'names the usual cause');
+});
+
+test('a retained image never downgrades a real failure', () => {
+  const s = summaryOf({ failed: 1, retained: 3 }, { removalEnabled: true });
+  assert.equal(s.health, SYNC_HEALTH.ALERT);
 });
 
 test('a truncated check says so, so counts are not read as complete', () => {
@@ -1711,6 +2104,49 @@ test('timestamps keep raw colons — %3A is rejected by Unleashed with a bare 40
   assert.equal(buildQueryString({ q: 'a b&c' }), 'q=a+b%26c');
   // Empty and absent values are dropped, so they never reach the signature.
   assert.equal(buildQueryString({ a: 1, b: undefined, c: '' }), 'a=1');
+});
+
+test('a deliberate single-page read is not reported as a truncated run', async () => {
+  // The corroboration probe asks for one page on purpose. Warning there would put
+  // "this run stops at page 1" in the log of every run that probes — which reads
+  // as a sync that left work undone, and is not one.
+  const { createUnleashedClient } = await import('../src/utils/unleashed.js');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      Pagination: { NumberOfPages: 33 },
+      Items: [{ ProductCode: 'A', Images: [] }],
+    }),
+  });
+
+  try {
+    const drain = async (options) => {
+      const warnings = [];
+      const client = createUnleashedClient(
+        { unleashed: { apiId: 'id', apiKey: 'key' } },
+        { info() {}, warn: (m) => warnings.push(m), error() {} },
+      );
+      // Drained, not broken out of: `break` closes the generator at the yield,
+      // and the truncation warning is emitted on the line after it.
+      for await (const _page of client.iterateProducts(options)) {
+      }
+      return warnings;
+    };
+
+    assert.ok(
+      (await drain({ maxPages: 1 })).some((w) => w.includes('stops at page 1')),
+      'a reconcile that stopped short must still say so',
+    );
+    assert.deepEqual(
+      await drain({ maxPages: 1, warnOnTruncation: false }),
+      [],
+      'but the probe must not',
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('Unleashed request signature is HMAC-SHA256 of the query string, base64', () => {
