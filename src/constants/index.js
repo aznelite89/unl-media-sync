@@ -403,3 +403,55 @@ export const DUPLICATE_SCAN_MAX_PAGES = 200;
  * and reports a partial, explicitly-truncated result instead.
  */
 export const DUPLICATE_SCAN_BUDGET_MS = 7 * 60_000;
+
+/**
+ * Customer suburb fill.
+ *
+ * Unleashed's own Shopify connector writes a Shopify address's `city` (labelled
+ * "Suburb" in Shopify's Australian address form) into the Unleashed `City`
+ * field and leaves `Suburb` empty — the field every hand-entered Unleashed
+ * address uses. The hub offers no mapping for this, so a job copies City into
+ * an empty Suburb after the fact. City is left as it was.
+ */
+export const CUSTOMER_PAGE_SIZE = 200;
+export const CUSTOMER_MAX_PAGES = 50;
+export const DEFAULT_SUBURB_LOOKBACK_MINUTES = 60;
+
+/** Returned by GET /Customers but not accepted back on update. */
+export const CUSTOMER_READ_ONLY_FIELDS = ['CreatedOn', 'CreatedBy', 'LastModifiedOn', 'LastModifiedBy'];
+
+export const SUBURB_OUTCOME = {
+  /** At least one address had its empty Suburb filled from City. */
+  FILLED: 'filled',
+  /** Every address already had a Suburb, or had no City to copy. */
+  UNCHANGED: 'unchanged',
+  /** Would have filled something, but writes are off. */
+  DRY_RUN: 'dry_run',
+  /** The update call threw, or the re-read did not show the fill. */
+  FAILED: 'failed',
+};
+
+/**
+ * What POST /Customers/{guid} accepts, per the API docs. GET returns more
+ * (Contacts, XeroContactId, SourceId, Reminder, address Guids, extra Currency
+ * fields) and sending any of it back is answered with a bare HTTP 500.
+ */
+export const CUSTOMER_UPDATE_FIELDS = [
+  'Guid', 'CustomerCode', 'CustomerName', 'CustomerType', 'CustomerTypeGuid',
+  'ContactFirstName', 'ContactLastName', 'Email', 'EmailCC',
+  'PhoneNumber', 'MobileNumber', 'FaxNumber', 'DDINumber', 'TollFreeNumber', 'Website',
+  'BankAccount', 'BankBranch', 'BankName', 'GSTVATNumber', 'EORINumber',
+  'Notes', 'Taxable', 'TaxCode', 'TaxRate', 'DiscountRate', 'PaymentTerm',
+  'SellPriceTier', 'SalesPerson', 'SalesOrderGroup',
+  'DeliveryMethod', 'DefaultWarehouse', 'HasCreditLimit', 'CreditLimit',
+  'PrintInvoice', 'PrintPackingSlipInsteadOfInvoice', 'StopCredit', 'Obsolete',
+  'XeroSalesAccount', 'XeroCostOfGoodsAccount',
+];
+export const CURRENCY_UPDATE_FIELDS = ['CurrencyCode', 'Description', 'Guid'];
+export const ADDRESS_UPDATE_FIELDS = [
+  'AddressType', 'AddressName', 'StreetAddress', 'StreetAddress2', 'Suburb', 'City',
+  'Region', 'Country', 'PostalCode', 'IsDefault', 'DeliveryInstruction',
+];
+/** Docs: Salesperson needs Guid (Email/FullName optional); DefaultWarehouse needs Guid or WarehouseCode. */
+export const SALESPERSON_UPDATE_FIELDS = ['Guid', 'Email', 'FullName'];
+export const WAREHOUSE_UPDATE_FIELDS = ['Guid', 'WarehouseCode'];

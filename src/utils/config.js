@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_SYNCED_IMAGES,
   DEFAULT_PENDING_WARN_THRESHOLD,
   DEFAULT_RECONCILE_LOOKBACK_MINUTES,
+  DEFAULT_SUBURB_LOOKBACK_MINUTES,
   RECONCILE_MAX_PAGES,
   ZERO_ACTIVITY_PROBE_DAYS,
 } from '../constants/index.js';
@@ -84,6 +85,16 @@ export function loadConfig(options = {}) {
      */
     deleteRemovedMedia: readBool(process.env.DELETE_REMOVED_MEDIA, false),
     reorderMedia: readBool(process.env.REORDER_MEDIA, true),
+    /**
+     * Off by default so a deploy never starts editing customer records on its
+     * own; the scheduled fill is a no-op until this is switched on. The CLI's
+     * `--apply` ignores it. DRY_RUN still overrides both.
+     */
+    fillCustomerSuburb: readBool(process.env.FILL_CUSTOMER_SUBURB, false),
+    suburbLookbackMinutes: readInt(
+      process.env.SUBURB_LOOKBACK_MINUTES,
+      DEFAULT_SUBURB_LOOKBACK_MINUTES,
+    ),
     dryRun: readBool(process.env.DRY_RUN, false),
   };
 

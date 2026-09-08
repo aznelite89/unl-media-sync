@@ -364,6 +364,35 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and emails a health summary |
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 | `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
+| `fillCustomerSuburb` | timer, every 15 min | copies City into an empty Suburb on Unleashed customer addresses the Shopify connector wrote — see [Customer suburb fill](#customer-suburb-fill). No-op until `FILL_CUSTOMER_SUBURB=true` |
+
+### Customer suburb fill
+
+Unleashed's Shopify connector creates and updates Unleashed customers from Shopify orders
+(the hub's **Customer Synchronization** toggle). Shopify's Australian address form labels its
+`city` field "Suburb", and the connector writes that value into the Unleashed **City** field,
+leaving **Suburb** empty. Every hand-entered Unleashed address uses Suburb, so Shopify-sourced
+customers end up with their suburb in the wrong column. The hub offers no field mapping for
+addresses, so this cannot be fixed with a setting.
+
+The fill copies City into Suburb wherever Suburb is empty and City is not. City is left as it
+was. Nothing else on the record is touched: the update sends the whole customer back exactly as
+it was read, minus the read-only timestamp fields, because the API does not say which omitted
+fields survive an update and which are blanked. After each write the record is re-read; the
+outcome is `filled` only if every Suburb is now present, and any other top-level field that
+changed is named in the log with a warning.
+
+The connector re-writes the Postal address on every new Shopify order and blanks Suburb again,
+which is why this is a timer and not a one-off backfill.
+
+```bash
+node scripts/customer-suburb-cli.js --all                      # report only, nothing written
+node scripts/customer-suburb-cli.js --all --csv reports/suburb.csv
+node scripts/customer-suburb-cli.js --code DAR001 --apply       # one customer, verified after write
+node scripts/customer-suburb-cli.js --all --apply               # backfill
+```
+
+The CLI's `--apply` writes regardless of `FILL_CUSTOMER_SUBURB`; `DRY_RUN=true` blocks both.
 
 ### Why the daily report exists
 
@@ -483,6 +512,8 @@ Deliveries older than 5 minutes are rejected.
 | `DAILY_LOOKBACK_HOURS` | `24` | daily verification window |
 | `PENDING_WARN_THRESHOLD` | `5` | pending products tolerated before the daily report warns |
 | `ZERO_ACTIVITY_PROBE_DAYS` | `7` | how far back a silent day is checked before it counts as a fault |
+| `FILL_CUSTOMER_SUBURB` | `false` | let the 15-minute timer write Suburb on customer addresses. Off so a deploy never starts editing customer records by itself; the CLI's `--apply` ignores it |
+| `SUBURB_LOOKBACK_MINUTES` | `60` | customer modification window the suburb timer re-reads |
 
 ## Suggested rollout
 

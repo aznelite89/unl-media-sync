@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-08
+
+### Added
+- `fillCustomerSuburb` timer (every 15 min) and `scripts/customer-suburb-cli.js`: copy City into an empty Suburb on Unleashed customer addresses. The Shopify connector writes Shopify's "Suburb" (its `city` field) into Unleashed City and leaves Suburb blank; the hub has no address mapping to change. 142 addresses on 130 customers affected at the time of writing.
+- `FILL_CUSTOMER_SUBURB` (default `false`) and `SUBURB_LOOKBACK_MINUTES` (default `60`) settings.
+- Unleashed client: `post`, `getCustomerByGuid`, `iterateCustomers`, `updateCustomer`.
+
+### Fixed
+- Customer update body is an allowlist of the documented POST fields. Sending the GET record back verbatim, or with only the timestamp fields removed, is answered with a bare HTTP 500: `Contacts`, `XeroContactId`, `SourceId`, `Reminder`, address `Guid`s, `SellPriceTierReference`, and the `LastModifiedOn` / `Obsolete` / `WarehouseName` keys inside `Currency`, `SalesPerson` and `DefaultWarehouse` all trigger it. Found on the first live runs, 8 Sep 2026; the post-write re-read showed none of the omitted fields were blanked.
+
 ## 2026-08-21
 
 ### Added

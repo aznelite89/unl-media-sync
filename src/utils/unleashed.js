@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 
 import {
   CLIENT_TYPE,
+  CUSTOMER_MAX_PAGES,
+  CUSTOMER_PAGE_SIZE,
   UNLEASHED_API_BASE,
   UNLEASHED_FIRST_PAGE,
   UNLEASHED_HEADER,
@@ -122,6 +124,37 @@ export function createUnleashedClient(config, log = console) {
     }
 
     return response.json();
+  }
+
+  /**
+   * Signed POST. Unleashed uses POST for both create and update; the signature
+   * covers the query string only, which is empty here, so it signs `''`.
+   *
+   * @param {string} path Leading slash.
+   * @param {object} body
+   */
+  async function post(path, body) {
+    const response = await fetchWithRetry(
+      () =>
+        fetch(`${UNLEASHED_API_BASE}${path}`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            [UNLEASHED_HEADER.AUTH_ID]: apiId,
+            [UNLEASHED_HEADER.SIGNATURE]: signQueryString('', apiKey),
+            [UNLEASHED_HEADER.CLIENT_TYPE]: CLIENT_TYPE,
+          },
+          body: JSON.stringify(body),
+        }),
+      { label: `unleashed POST ${path}`, log },
+    );
+
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Unleashed POST ${path} failed: HTTP ${response.status} ${text.slice(0, 500)}`);
+    }
+    return text ? JSON.parse(text) : null;
   }
 
   /**
@@ -257,8 +290,61 @@ export function createUnleashedClient(config, log = console) {
     return JSON.parse(body);
   }
 
+  /** @param {string} guid */
+  async function getCustomerByGuid(guid) {
+    return get(`/Customers/${encodeURIComponent(guid)}`);
+  }
+
+  /**
+   * Yields customers modified since `sinceIso` (or every customer when it is
+   * omitted), one page at a time. Same paging rules as `iterateProducts`.
+   *
+   * @param {{ sinceIso?: string, customerCode?: string, pageSize?: number, maxPages?: number }} options
+   */
+  async function* iterateCustomers({
+    sinceIso,
+    customerCode,
+    pageSize = CUSTOMER_PAGE_SIZE,
+    maxPages = CUSTOMER_MAX_PAGES,
+  } = {}) {
+    let pageNumber = UNLEASHED_FIRST_PAGE;
+    let totalPages = Number.POSITIVE_INFINITY;
+
+    while (pageNumber <= totalPages && pageNumber <= maxPages) {
+      const page = await get(`/Customers/${pageNumber}`, {
+        pageSize,
+        modifiedSince: sinceIso,
+        customerCode,
+      });
+      totalPages = Number(page?.Pagination?.NumberOfPages ?? 1) || 1;
+      const items = page?.Items ?? [];
+      if (items.length === 0 || pageNumber > totalPages) return;
+      yield { items, pageNumber, totalPages };
+      if (totalPages > maxPages && pageNumber === maxPages) {
+        log.warn?.(`Unleashed has ${totalPages} customer pages; this run stops at page ${maxPages}.`);
+      }
+      pageNumber += 1;
+    }
+  }
+
+  /**
+   * Updates a customer. Send the full record as read from GET (minus the
+   * read-only fields) with only the intended change applied: the API does not
+   * document which omitted fields survive an update and which are blanked.
+   *
+   * @param {string} guid
+   * @param {object} body
+   */
+  async function updateCustomer(guid, body) {
+    return post(`/Customers/${encodeURIComponent(guid)}`, body);
+  }
+
   return {
     get,
+    post,
+    getCustomerByGuid,
+    iterateCustomers,
+    updateCustomer,
     getProductByGuid,
     getProductByCode,
     iterateProducts,
