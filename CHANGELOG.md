@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-28
+
+### Added
+- Customer notes guard: puts back Unleashed customer Notes the Shopify connector wipes on a website order (`GUARD_CUSTOMER_NOTES`, default `false`).
+- Notes snapshot in the `customer-notes` blob container, with a daily copy under `history/` as a restore point.
+- `scripts/customer-notes-cli.js`: `--report`, `--run`, `--code`, `--restore`, `--export`.
+- Unleashed client: `listShopifyOrdersForCustomer`.
+- `@azure/storage-blob` dependency.
+- Self-tests for the notes guard.
+
+### Changed
+- `fillCustomerSuburb` timer renamed `customerUpkeep`; runs the notes guard, then the suburb fill.
+
 ## 2026-09-08
 
 ### Added

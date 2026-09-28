@@ -9,6 +9,7 @@ import {
   UNLEASHED_HEADER,
   UNLEASHED_PAGE_SIZE,
   RECONCILE_MAX_PAGES,
+  SHOPIFY_ORDER_CREATOR,
   WEBHOOK_MAX_AGE_SECONDS,
 } from '../constants/index.js';
 import { fetchWithRetry } from './http.js';
@@ -339,12 +340,44 @@ export function createUnleashedClient(config, log = console) {
     return post(`/Customers/${encodeURIComponent(guid)}`, body);
   }
 
+  /**
+   * Sales orders the Shopify connector created for one customer, modified since
+   * `sinceIso`. A new order's LastModifiedOn is never before its CreatedOn, so
+   * the filter cannot drop one created in the window; the caller checks
+   * CreatedOn itself. `customerCode` is a prefix match in Unleashed, so the
+   * code is compared exactly here.
+   *
+   * @param {string} customerCode
+   * @param {string} sinceIso
+   */
+  async function listShopifyOrdersForCustomer(customerCode, sinceIso) {
+    const wanted = String(customerCode).toLowerCase();
+    const orders = [];
+    let pageNumber = UNLEASHED_FIRST_PAGE;
+    let totalPages = 1;
+    while (pageNumber <= totalPages) {
+      const page = await get(`/SalesOrders/${pageNumber}`, {
+        customerCode,
+        modifiedSince: sinceIso,
+        pageSize: CUSTOMER_PAGE_SIZE,
+      });
+      totalPages = Number(page?.Pagination?.NumberOfPages ?? 1) || 1;
+      for (const order of page?.Items ?? []) {
+        const code = String(order?.Customer?.CustomerCode ?? '').toLowerCase();
+        if (code === wanted && order?.CreatedBy === SHOPIFY_ORDER_CREATOR) orders.push(order);
+      }
+      pageNumber += 1;
+    }
+    return orders;
+  }
+
   return {
     get,
     post,
     getCustomerByGuid,
     iterateCustomers,
     updateCustomer,
+    listShopifyOrdersForCustomer,
     getProductByGuid,
     getProductByCode,
     iterateProducts,

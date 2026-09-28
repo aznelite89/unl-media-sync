@@ -13,6 +13,7 @@
     "register-webhook": "node scripts/register-webhook.js"
   },
   "dependencies": {
-    "@azure/functions": "^4.6.0"
+    "@azure/functions": "^4.6.0",
+    "@azure/storage-blob": "^12.34.0"
   }
 }

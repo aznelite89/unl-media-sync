@@ -95,6 +95,15 @@ export function loadConfig(options = {}) {
       process.env.SUBURB_LOOKBACK_MINUTES,
       DEFAULT_SUBURB_LOOKBACK_MINUTES,
     ),
+    /**
+     * Off by default for the same reason. When on, the customer timer keeps a
+     * snapshot of every customer's Notes and puts back any the Shopify
+     * connector wipes on a website order.
+     */
+    guardCustomerNotes: readBool(process.env.GUARD_CUSTOMER_NOTES, false),
+    /** Where the notes snapshot lives; the Function App's own storage unless set. */
+    notesStorageConnection:
+      process.env.NOTES_STORAGE_CONNECTION || process.env.AzureWebJobsStorage || '',
     dryRun: readBool(process.env.DRY_RUN, false),
   };
 

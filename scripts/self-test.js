@@ -52,6 +52,16 @@ import {
   syncUnleashedProduct,
 } from '../src/utils/sync.js';
 import { buildQueryString, signQueryString, verifyWebhook } from '../src/utils/unleashed.js';
+import { NOTES_OUTCOME, SHOPIFY_ORDER_CREATOR } from '../src/constants/index.js';
+import { forceRestore, guardNotes } from '../src/utils/customerNotes.js';
+import {
+  NOTES_ACTION,
+  parseSnapshot,
+  parseUnleashedDate,
+  planNotes,
+  sameNotes,
+} from '../src/utils/customerNotesPlan.js';
+import { createMemoryNotesStore } from '../src/utils/customerNotesStore.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -2199,6 +2209,250 @@ test('webhook verification rejects a tampered body, bad key and stale timestamp'
     false,
   );
   assert.equal(verifyWebhook({ rawBody: body, signature: '', timestamp, signatureKey: key }).valid, false);
+});
+
+// --- Customer notes guard -------------------------------------------------
+// Shapes from MB712 / price@searay.net.au, the customer Jian tested on.
+
+const MINUTE = 60_000;
+const T0 = Date.parse('2026-09-22T06:00:00Z');
+const MB712_GUID = '9a6fca18-afcf-4f9e-816c-caa9f2d08dae';
+const JIAN_NOTE = 'THIS IS A TEST. TESTING TO SEE IF THESE ORDER NOTES DISAPPEAR.';
+const QUIET_LOG = { info() {}, warn() {}, error() {} };
+const unleashedDate = (ms) => `/Date(${ms})/`;
+
+function notesCustomer(overrides = {}) {
+  return {
+    Guid: MB712_GUID,
+    CustomerCode: 'MB712',
+    CustomerName: 'Mark Blencowe',
+    Notes: JIAN_NOTE,
+    PaymentTerm: 'C.O.D.',
+    SellPriceTier: 'Exclusive',
+    LastModifiedOn: unleashedDate(T0),
+    Addresses: [
+      { AddressType: 'Physical', StreetAddress: '135 Ironwood Street', Suburb: 'ASPLEY', Region: 'QLD', PostalCode: '4034', Guid: 'a1' },
+    ],
+    ...overrides,
+  };
+}
+
+/** Enough of the Unleashed client for the guard, over an in-memory customer list. */
+function fakeNotesUnleashed({ customers, orders = [], ignoreWrites = false }) {
+  const byGuid = new Map(customers.map((customer) => [customer.Guid, { ...customer }]));
+  const calls = { updates: [], orderLookups: [] };
+  return {
+    calls,
+    byGuid,
+    async *iterateCustomers({ sinceIso, customerCode } = {}) {
+      const sinceMs = sinceIso ? Date.parse(`${sinceIso}Z`) : null;
+      const items = [...byGuid.values()].filter(
+        (customer) =>
+          (sinceMs === null || parseUnleashedDate(customer.LastModifiedOn) >= sinceMs) &&
+          (!customerCode || customer.CustomerCode.toLowerCase().startsWith(customerCode.toLowerCase())),
+      );
+      if (items.length) yield { items: items.map((item) => ({ ...item })), pageNumber: 1, totalPages: 1 };
+    },
+    async getCustomerByGuid(guid) {
+      return { ...byGuid.get(guid) };
+    },
+    async updateCustomer(guid, body) {
+      calls.updates.push({ guid, body });
+      if (!ignoreWrites) byGuid.set(guid, { ...byGuid.get(guid), Notes: body.Notes });
+    },
+    async listShopifyOrdersForCustomer(customerCode, sinceIso) {
+      calls.orderLookups.push({ customerCode, sinceIso });
+      return orders.filter((order) => order.Customer.CustomerCode === customerCode);
+    },
+  };
+}
+
+const webOrder = (number, createdMs) => ({
+  OrderNumber: number,
+  CreatedBy: SHOPIFY_ORDER_CREATOR,
+  CreatedOn: unleashedDate(createdMs),
+  Customer: { CustomerCode: 'MB712' },
+});
+
+/** A snapshot as the previous whole pass, at `takenMs`, would have left it. */
+function notesSnapshotAt(takenMs, entry = { code: 'MB712', notes: JIAN_NOTE, seenAt: new Date(takenMs).toISOString() }) {
+  return { version: 1, takenAt: new Date(takenMs).toISOString(), customers: { [MB712_GUID]: entry }, pending: {} };
+}
+
+const runGuard = (unleashed, store, extra = {}) =>
+  guardNotes({ unleashed, store, config: { dryRun: false }, log: QUIET_LOG, apply: true, persist: true, ...extra });
+
+test('notes plan: new text is recorded, a blank with nothing on file is ignored', () => {
+  assert.equal(planNotes({ Notes: 'Strictly COD' }, undefined), NOTES_ACTION.RECORD);
+  assert.equal(planNotes({ Notes: '' }, undefined), NOTES_ACTION.NONE);
+  assert.equal(planNotes({ Notes: null }, undefined), NOTES_ACTION.NONE);
+});
+
+test('notes plan: blank over text on file is a wipe; a known clear is not re-judged', () => {
+  const entry = { notes: JIAN_NOTE };
+  assert.equal(planNotes({ Notes: '' }, entry), NOTES_ACTION.WIPED);
+  assert.equal(planNotes({ Notes: '   ' }, entry), NOTES_ACTION.WIPED);
+  assert.equal(planNotes({ Notes: '' }, { ...entry, clearedAt: '2026-09-22T00:00:00Z' }), NOTES_ACTION.NONE);
+});
+
+test('notes plan: line endings and edge whitespace are not an edit', () => {
+  assert.equal(sameNotes('Strictly COD\r\n$114/g ', 'Strictly COD\n$114/g'), true);
+  assert.equal(planNotes({ Notes: 'Strictly COD\r\n$114/g' }, { notes: 'Strictly COD\n$114/g' }), NOTES_ACTION.NONE);
+  assert.equal(planNotes({ Notes: 'Strictly COD, $120/g' }, { notes: 'Strictly COD' }), NOTES_ACTION.REPLACE);
+});
+
+test('notes plan: Unleashed /Date()/ values and ISO strings both parse', () => {
+  assert.equal(parseUnleashedDate('/Date(1790058009129)/'), 1790058009129);
+  assert.equal(parseUnleashedDate('2026-09-22T06:05:09.724Z'), Date.parse('2026-09-22T06:05:09.724Z'));
+  assert.equal(parseUnleashedDate(null), null);
+});
+
+test('an unreadable snapshot throws rather than starting a fresh baseline over it', () => {
+  assert.throws(() => parseSnapshot('{not json'));
+  assert.throws(() => parseSnapshot('{"version":1}'));
+});
+
+test('first pass is a baseline: records every note, restores and looks up nothing', async () => {
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer(), notesCustomer({ Guid: 'g2', CustomerCode: 'GCJ432', Notes: '' })],
+  });
+  const store = createMemoryNotesStore();
+  const report = await runGuard(unleashed, store, { nowMs: T0 });
+
+  assert.equal(report.baseline, true);
+  assert.deepEqual(report.byOutcome, { [NOTES_OUTCOME.BASELINE]: 1 });
+  assert.equal(unleashed.calls.updates.length, 0);
+  assert.equal(unleashed.calls.orderLookups.length, 0);
+  const saved = store.peek();
+  assert.equal(saved.customers[MB712_GUID].notes, JIAN_NOTE);
+  assert.equal(saved.customers.g2, undefined);
+  assert.equal(saved.takenAt, new Date(T0).toISOString());
+});
+
+test("Jian's test: notes wiped with web order #3185 are put back, the rest of the record as read", async () => {
+  const wipeMs = T0 + 5 * MINUTE;
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(wipeMs) })],
+    orders: [webOrder('web#3185', wipeMs - 5_000)],
+  });
+  const store = createMemoryNotesStore(notesSnapshotAt(T0));
+  const report = await runGuard(unleashed, store, { nowMs: T0 + 15 * MINUTE });
+
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.RESTORED);
+  assert.deepEqual(report.results[0].orders, ['web#3185']);
+  assert.equal(unleashed.byGuid.get(MB712_GUID).Notes, JIAN_NOTE);
+  const { body } = unleashed.calls.updates[0];
+  assert.equal(body.Notes, JIAN_NOTE);
+  assert.equal(body.PaymentTerm, 'C.O.D.');
+  assert.equal(body.SellPriceTier, 'Exclusive');
+  assert.equal(body.Addresses[0].StreetAddress, '135 Ironwood Street');
+  assert.equal(body.Addresses[0].Guid, undefined, 'address Guids are answered with a bare 500');
+  assert.equal(body.LastModifiedOn, undefined);
+  assert.equal(store.peek().customers[MB712_GUID].restoredAt, new Date(T0 + 15 * MINUTE).toISOString());
+});
+
+test('notes blanked with no web order are a person clearing them: left blank, text kept', async () => {
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(T0 + 5 * MINUTE) })],
+  });
+  const store = createMemoryNotesStore(notesSnapshotAt(T0));
+  const report = await runGuard(unleashed, store, { nowMs: T0 + 15 * MINUTE });
+
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.CLEARED);
+  assert.equal(unleashed.calls.updates.length, 0);
+  const entry = store.peek().customers[MB712_GUID];
+  assert.equal(entry.notes, JIAN_NOTE, 'the cleared text stays in the snapshot as the backup');
+  assert.ok(entry.clearedAt);
+
+  // Touched again later, still blank, and now a web order arrives: a known clear is not undone.
+  unleashed.byGuid.get(MB712_GUID).LastModifiedOn = unleashedDate(T0 + 35 * MINUTE);
+  const again = await runGuard(
+    fakeNotesUnleashed({ customers: [unleashed.byGuid.get(MB712_GUID)], orders: [webOrder('web#3200', T0 + 34 * MINUTE)] }),
+    store,
+    { nowMs: T0 + 45 * MINUTE },
+  );
+  assert.deepEqual(again.byOutcome, {});
+});
+
+test('a web order from before the window does not make a blanking the connector', async () => {
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(T0 + 5 * MINUTE) })],
+    orders: [webOrder('web#3160', T0 - 3 * 24 * 60 * MINUTE)],
+  });
+  const report = await runGuard(unleashed, createMemoryNotesStore(notesSnapshotAt(T0)), { nowMs: T0 + 15 * MINUTE });
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.CLEARED);
+  assert.equal(unleashed.calls.updates.length, 0);
+});
+
+test('a dry run restores nothing, and the next live run still restores with the original window', async () => {
+  const wipeMs = T0 + 5 * MINUTE;
+  const customers = [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(wipeMs) })];
+  const orders = [webOrder('web#3185', wipeMs)];
+  const store = createMemoryNotesStore(notesSnapshotAt(T0));
+
+  const dry = fakeNotesUnleashed({ customers, orders });
+  const first = await runGuard(dry, store, { nowMs: T0 + 15 * MINUTE, config: { dryRun: true } });
+  assert.equal(first.results[0].outcome, NOTES_OUTCOME.DRY_RUN);
+  assert.equal(dry.calls.updates.length, 0);
+  assert.equal(first.pending, 1);
+
+  // Hours later: the customer has not been modified since, so only `pending` brings it back.
+  const live = fakeNotesUnleashed({ customers, orders });
+  const second = await runGuard(live, store, { nowMs: T0 + 6 * 60 * MINUTE });
+  assert.equal(second.results[0].outcome, NOTES_OUTCOME.RESTORED);
+  assert.equal(live.byGuid.get(MB712_GUID).Notes, JIAN_NOTE);
+  assert.equal(second.pending, 0);
+});
+
+test('a restore that does not stick is FAILED and retried next run', async () => {
+  const wipeMs = T0 + 5 * MINUTE;
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(wipeMs) })],
+    orders: [webOrder('web#3185', wipeMs)],
+    ignoreWrites: true,
+  });
+  const report = await runGuard(unleashed, createMemoryNotesStore(notesSnapshotAt(T0)), { nowMs: T0 + 15 * MINUTE });
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.FAILED);
+  assert.equal(report.pending, 1);
+});
+
+test('text replaced alongside a web order is kept but flagged, with the old text saved', async () => {
+  const changeMs = T0 + 5 * MINUTE;
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: 'Imported from Mailchimp; original status: blank', LastModifiedOn: unleashedDate(changeMs) })],
+    orders: [webOrder('web#3186', changeMs)],
+  });
+  const store = createMemoryNotesStore(notesSnapshotAt(T0));
+  const report = await runGuard(unleashed, store, { nowMs: T0 + 15 * MINUTE });
+
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.REPLACED_WITH_WEB_ORDER);
+  assert.equal(unleashed.calls.updates.length, 0);
+  const entry = store.peek().customers[MB712_GUID];
+  assert.equal(entry.notes, 'Imported from Mailchimp; original status: blank');
+  assert.equal(entry.previous, JIAN_NOTE);
+});
+
+test('a report-only run saves nothing, so the window does not move past what it saw', async () => {
+  const unleashed = fakeNotesUnleashed({
+    customers: [notesCustomer({ Notes: '', LastModifiedOn: unleashedDate(T0 + 5 * MINUTE) })],
+    orders: [webOrder('web#3185', T0 + 5 * MINUTE)],
+  });
+  const store = createMemoryNotesStore(notesSnapshotAt(T0));
+  const report = await runGuard(unleashed, store, { nowMs: T0 + 15 * MINUTE, apply: false, persist: false });
+  assert.equal(report.results[0].outcome, NOTES_OUTCOME.DRY_RUN);
+  assert.equal(store.peek().takenAt, new Date(T0).toISOString());
+});
+
+test('force restore puts back text the guard classed as cleared', async () => {
+  const unleashed = fakeNotesUnleashed({ customers: [notesCustomer({ Notes: '' })] });
+  const cleared = { code: 'MB712', notes: JIAN_NOTE, seenAt: new Date(T0).toISOString(), clearedAt: new Date(T0).toISOString() };
+  const store = createMemoryNotesStore(notesSnapshotAt(T0, cleared));
+  const result = await forceRestore({
+    customerCode: 'mb712', unleashed, store, config: { dryRun: false }, log: QUIET_LOG, apply: true,
+  });
+  assert.equal(result.outcome, NOTES_OUTCOME.RESTORED);
+  assert.equal(unleashed.byGuid.get(MB712_GUID).Notes, JIAN_NOTE);
+  assert.equal(store.peek().customers[MB712_GUID].clearedAt, undefined);
 });
 
 let failures = 0;

@@ -338,7 +338,7 @@ az functionapp config appsettings set -g $RG -n $APP \
   --settings "WEBSITE_RUN_FROM_PACKAGE=https://$STORAGE.blob.core.windows.net/function-releases/$NAME?$SAS"
 ```
 
-Confirm it took: `az functionapp function list -g $RG -n $APP --query "length(@)"` must report **6**,
+Confirm it took: `az functionapp function list -g $RG -n $APP --query "length(@)"` must report **7**,
 and Application Insights should show the next `reconcileMedia` run within 10 minutes.
 
 Secrets belong in app settings (or Key Vault references) — never in the repo, and never in
@@ -364,7 +364,7 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and emails a health summary |
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 | `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
-| `fillCustomerSuburb` | timer, every 15 min | copies City into an empty Suburb on Unleashed customer addresses the Shopify connector wrote — see [Customer suburb fill](#customer-suburb-fill). No-op until `FILL_CUSTOMER_SUBURB=true` |
+| `customerUpkeep` | timer, every 15 min | undoes what the Shopify connector does to Unleashed customers on a website order: puts back wiped Notes ([Customer notes guard](#customer-notes-guard), `GUARD_CUSTOMER_NOTES`), then copies City into an empty Suburb ([Customer suburb fill](#customer-suburb-fill), `FILL_CUSTOMER_SUBURB`). Each part is a no-op until its setting is `true` |
 
 ### Customer suburb fill
 
@@ -393,6 +393,45 @@ node scripts/customer-suburb-cli.js --all --apply               # backfill
 ```
 
 The CLI's `--apply` writes regardless of `FILL_CUSTOMER_SUBURB`; `DRY_RUN=true` blocks both.
+
+### Customer notes guard
+
+On every website order the connector also copies the Shopify customer's `note` into the Unleashed
+customer's **Notes**, and it does so when the Shopify note is blank. Searay keeps trading terms and
+quoted prices in that box, so a first website order from a trade customer wipes them. Reproduced by
+Jian on 21-22 Sep 2026: MB712 (Shopify `price@searay.net.au`) had a test note, web orders #3180,
+#3181 and #3185 went through, and the Notes came back empty. Addresses on the **Physical** tab are
+not touched; the **Postal** address is replaced by the Shopify one. The hub has no per-field
+setting, only Customer Sync on or off.
+
+The guard keeps a snapshot of every customer's Notes in the private `customer-notes` container of
+the Function App's storage account (`snapshot.json`, plus `history/YYYY-MM-DD.json` as a daily
+restore point). Each run reads the customers modified since the previous run (less 30 minutes of
+slack) and, per customer:
+
+| Seen | Done | Outcome |
+|---|---|---|
+| new or edited text | recorded; the replaced text is kept as `previous` | `recorded` |
+| text replaced by different text **and** a web order since the last run | kept, flagged in the log; the old text is kept as `previous` | `replaced_with_web_order` |
+| blank where the snapshot has text **and** a web order since the last run | the snapshot's text is written back, record re-read to confirm | `restored` |
+| blank where the snapshot has text, **no** web order | a person cleared it: left blank, text kept in the snapshot | `cleared` |
+
+A web order is a sales order with `CreatedBy = Shopify` (numbers `web#NNNN`); Unleashed records
+the same user on connector and API customer edits, so `LastModifiedBy` cannot tell them apart. A
+restore that fails, or is held back by `DRY_RUN`, stays `pending` in the snapshot and is retried
+with its original window on every run until it lands. The first run is a baseline: it records
+text and restores nothing. It was taken by hand on 28 Sep 2026 (768 of 1,440 customers had notes).
+
+The guard runs before the suburb fill in the same timer, because the fill writes the whole record
+back, Notes included, as it read it.
+
+```bash
+export NOTES_STORAGE_CONNECTION="$(az storage account show-connection-string -g searay-func-rg -n searayunleashedsync -o tsv)"
+node scripts/customer-notes-cli.js --report                     # what the next run would do; writes nothing
+node scripts/customer-notes-cli.js --code MB712 --apply         # one customer
+node scripts/customer-notes-cli.js --restore MB712 --apply      # snapshot text back, web order or not
+node scripts/customer-notes-cli.js --export reports/notes.json  # local copy of every customer's notes
+```
 
 ### Why the daily report exists
 

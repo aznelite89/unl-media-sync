@@ -432,6 +432,54 @@ export const SUBURB_OUTCOME = {
 };
 
 /**
+ * Customer notes guard.
+ *
+ * On every website order the connector copies the Shopify customer's `note`
+ * into the Unleashed customer's Notes, including a blank one, which wipes
+ * whatever Searay had typed there (trading terms, quoted prices). Reproduced by
+ * Jian on MB712 / price@searay.net.au, 21-22 Sep 2026. The hub has no setting
+ * for it, so a snapshot of every customer's Notes is kept and a wipe that
+ * arrives together with a website order is put back.
+ */
+export const NOTES_OUTCOME = {
+  /** Notes were wiped alongside a website order and have been put back. */
+  RESTORED: 'restored',
+  /** Would have restored, but writes are off. */
+  DRY_RUN: 'dry_run',
+  /** Blanked with no website order since the last run: a person cleared them. Left alone; the text stays in the snapshot. */
+  CLEARED: 'cleared',
+  /** New or edited text, recorded in the snapshot. */
+  RECORDED: 'recorded',
+  /** Text replaced (not blanked) in the same window as a website order. Kept, previous text saved. */
+  REPLACED_WITH_WEB_ORDER: 'replaced_with_web_order',
+  /** First run: recorded, nothing compared. */
+  BASELINE: 'baseline',
+  /** Nothing to do. */
+  UNCHANGED: 'unchanged',
+  /** The update threw, or the re-read did not show the notes back. */
+  FAILED: 'failed',
+};
+
+/** `CreatedBy` on sales orders the Shopify connector creates (their numbers are `web#NNNN`). */
+export const SHOPIFY_ORDER_CREATOR = 'Shopify';
+
+/**
+ * Margin taken off the previous run's time when deciding which customers and
+ * website orders are new: covers clock skew and a connector write landing while
+ * the previous run was mid-walk.
+ */
+export const NOTES_WINDOW_SLACK_MINUTES = 30;
+
+export const NOTES_SNAPSHOT_VERSION = 1;
+export const NOTES_SNAPSHOT_CONTAINER = 'customer-notes';
+export const NOTES_SNAPSHOT_BLOB = 'snapshot.json';
+/** One copy per day (UTC), overwritten through the day, kept as restore points. */
+export const NOTES_HISTORY_PREFIX = 'history/';
+
+/** Wider pages for the first whole-list walk; Unleashed allows up to 1000. */
+export const NOTES_BASELINE_PAGE_SIZE = 1000;
+
+/**
  * What POST /Customers/{guid} accepts, per the API docs. GET returns more
  * (Contacts, XeroContactId, SourceId, Reminder, address Guids, extra Currency
  * fields) and sending any of it back is answered with a bare HTTP 500.
