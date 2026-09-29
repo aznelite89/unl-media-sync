@@ -320,7 +320,8 @@ Azure records no deployment at all.
 
 ```bash
 # Package: exactly host.json, package.json, package-lock.json, src/ and node_modules/ at the root.
-# No scripts/, no dotfiles — the deployed package carries 163 entries.
+# No scripts/, no dotfiles at the root. With node_modules from `npm ci --omit=dev` the
+# deployed package carries ~6,150 entries (29 Sep 2026).
 NAME="$(date -u +%Y%m%d%H%M%S)-$(uuidgen | tr 'A-Z' 'a-z').zip"
 KEY=$(az storage account keys list -g $RG -n $STORAGE --query "[0].value" -o tsv)
 
