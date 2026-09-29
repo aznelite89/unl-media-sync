@@ -5,6 +5,7 @@ import {
 } from '../constants/index.js';
 import { summariseDuplicateGroups } from './duplicates.js';
 import { summarise } from './logger.js';
+import { createPool } from './pool.js';
 import { syncUnleashedProduct } from './sync.js';
 
 /**
@@ -65,16 +66,34 @@ export async function syncByProductCode({
 
 /**
  * Walks every Unleashed product modified since `sinceIso` and syncs each one.
- * Products are handled sequentially — throughput is irrelevant here and it keeps
- * both APIs well inside their rate limits.
+ * Products are handled sequentially by default — throughput is irrelevant to
+ * the live sync and it keeps both APIs well inside their rate limits.
  *
- * @param {{ sinceIso?: string, limit?: number, unleashed: object, shopify: object, config: object, log: object }} input
+ * `concurrency` is for the read-only report, whose week-long window does not
+ * fit the function timeout one product at a time. `budgetMs` stops the walk
+ * before the host kills it: a killed report sends nothing, which is worse than
+ * one that says it is partial. `truncated` then carries the reason.
+ *
+ * @param {{
+ *   sinceIso?: string,
+ *   limit?: number,
+ *   startPage?: number,
+ *   maxPages?: number,
+ *   concurrency?: number,
+ *   budgetMs?: number | null,
+ *   unleashed: object,
+ *   shopify: object,
+ *   config: object,
+ *   log: object,
+ * }} input
  */
 export async function reconcile({
   sinceIso,
   limit,
   startPage,
   maxPages,
+  concurrency = 1,
+  budgetMs = null,
   unleashed,
   shopify,
   config,
@@ -83,6 +102,18 @@ export async function reconcile({
   const results = [];
   let scanned = 0;
   let lastPage = null;
+  const pool = createPool(concurrency);
+  const startedAt = Date.now();
+  /** Why the walk stopped early, or null. */
+  let outOfTime = null;
+  const checkBudget = () => {
+    if (budgetMs === null || Date.now() - startedAt < budgetMs) return false;
+    outOfTime =
+      `stopped after ${scanned} product(s): the ${Math.round(budgetMs / 1000)}s ` +
+      'time budget ran out';
+    log.warn?.(`reconcile: ${outOfTime}`);
+    return true;
+  };
   /**
    * Products Unleashed returned with no images at all. Held back rather than
    * skipped: whether that means "the last photo was deleted" or "the feed is
@@ -93,7 +124,7 @@ export async function reconcile({
   const emptyImageProducts = [];
   let withImagesSeen = 0;
 
-  for await (const { items, pageNumber, totalPages } of unleashed.iterateProducts({
+  walk: for await (const { items, pageNumber, totalPages } of unleashed.iterateProducts({
     sinceIso,
     startPage,
     maxPages: maxPages ?? config.maxPages,
@@ -102,8 +133,10 @@ export async function reconcile({
     log.info?.(`reconcile: page ${pageNumber}/${totalPages} — ${items.length} product(s)`);
 
     for (const unleashedProduct of items) {
-      if (limit && results.length >= limit) {
+      await pool.ready();
+      if (limit && results.length + pool.size >= limit) {
         log.info?.(`reconcile: stopping at limit of ${limit} product(s)`);
+        await pool.drain();
         return finish({
           results,
           scanned,
@@ -115,6 +148,8 @@ export async function reconcile({
         });
       }
 
+      if (checkBudget()) break walk;
+
       scanned += 1;
       if (!(unleashedProduct?.Images ?? []).length) {
         // Never touches Shopify here — most of these products simply have no
@@ -124,12 +159,13 @@ export async function reconcile({
       }
       withImagesSeen += 1;
 
-      await syncOne(unleashedProduct);
+      pool.run(() => syncOne(unleashedProduct));
     }
   }
+  await pool.drain();
 
   // The empty-image products, decided now that the feed can be vouched for.
-  if (emptyImageProducts.length > 0) {
+  if (emptyImageProducts.length > 0 && !outOfTime) {
     const evidence = await corroborateEmptyImages({
       withImagesSeen,
       unleashed,
@@ -151,8 +187,11 @@ export async function reconcile({
         );
       }
       for (const unleashedProduct of checking) {
-        await syncOne(unleashedProduct, true);
+        await pool.ready();
+        if (checkBudget()) break;
+        pool.run(() => syncOne(unleashedProduct, true));
       }
+      await pool.drain();
     } else {
       // Could not establish that the feed is returning image data at all. Left
       // alone, which is what this did unconditionally before 2026-08-21.
@@ -164,7 +203,15 @@ export async function reconcile({
     }
   }
 
-  return finish({ results, scanned, withImagesSeen, sinceIso, truncated: false, lastPage, config });
+  return finish({
+    results,
+    scanned,
+    withImagesSeen,
+    sinceIso,
+    truncated: outOfTime ?? false,
+    lastPage,
+    config,
+  });
 
   /**
    * @param {object} unleashedProduct

@@ -1,10 +1,16 @@
 import { app } from '@azure/functions';
 
-import { EMAIL_SUBJECT_TAG, SYNC_HEALTH } from '../constants/index.js';
+import {
+  EMAIL_SUBJECT_TAG,
+  HOURS_PER_DAY,
+  REPORT_SCAN_BUDGET_MS,
+  REPORT_SYNC_CONCURRENCY,
+  SYNC_HEALTH,
+} from '../constants/index.js';
 import { loadConfig } from '../utils/config.js';
 import { toAttachment } from '../utils/email.js';
 import { toLog } from '../utils/logger.js';
-import { sendReport } from '../utils/notify.js';
+import { isDailyEmailDue, isWeeklyReportDay, sendReport } from '../utils/notify.js';
 import { reconcile } from '../utils/reconcile.js';
 import {
   buildDailyCsv,
@@ -31,6 +37,10 @@ function isoDaysAgo(days, nowMs = Date.now()) {
  *
  * This pass NEVER writes: config.dryRun is forced on regardless of the app
  * setting, so a reporting job can't quietly become a second writer.
+ *
+ * It runs every day, but a healthy result is only emailed on Monday morning
+ * (see OK_REPORT_WEEKDAY), and Monday's pass looks back a week so that email
+ * covers it. A WARN or ALERT is emailed the day it happens.
  */
 async function handler(timer, context) {
   const log = toLog(context);
@@ -39,12 +49,23 @@ async function handler(timer, context) {
   const unleashed = createUnleashedClient(config, log);
   const shopify = createShopifyClient(config, log);
 
-  const sinceIso = isoDaysAgo(config.dailyLookbackHours / 24);
-  log.info(`daily report: verifying changes since ${sinceIso}`);
+  const nowMs = Date.now();
+  const weekly = isWeeklyReportDay(nowMs);
+  const lookbackHours = weekly ? config.weeklyLookbackHours : config.dailyLookbackHours;
+  const sinceIso = isoDaysAgo(lookbackHours / HOURS_PER_DAY, nowMs);
+  log.info(`daily report: verifying changes since ${sinceIso}${weekly ? ' (weekly)' : ''}`);
 
   let report;
   try {
-    report = await reconcile({ sinceIso, unleashed, shopify, config, log });
+    report = await reconcile({
+      sinceIso,
+      concurrency: REPORT_SYNC_CONCURRENCY,
+      budgetMs: REPORT_SCAN_BUDGET_MS,
+      unleashed,
+      shopify,
+      config,
+      log,
+    });
   } catch (error) {
     // The check itself failing is the loudest possible signal.
     log.error(`daily report: verification pass failed — ${error.message}`);
@@ -71,7 +92,7 @@ async function handler(timer, context) {
   if (report.scanned === 0) {
     const probeDays = config.zeroActivityProbeDays;
     try {
-      const probeCount = await unleashed.countProductsModifiedSince(isoDaysAgo(probeDays));
+      const probeCount = await unleashed.countProductsModifiedSince(isoDaysAgo(probeDays, nowMs));
       activity = { probeDays, probeCount };
       log.info(`daily report: no changes in the window; ${probeCount} in the last ${probeDays}d`);
     } catch (error) {
@@ -84,8 +105,9 @@ async function handler(timer, context) {
   const summary = buildDailySummary({
     report,
     pendingWarnThreshold: config.pendingWarnThreshold,
-    lookbackHours: config.dailyLookbackHours,
+    lookbackHours,
     activity,
+    okEmailedWeekly: true,
   });
 
   // The email names the products inline; the CSV is what survives a long day
@@ -102,7 +124,13 @@ async function handler(timer, context) {
     );
   }
 
-  const delivery = await sendReport({ config, summary, attachments, log });
+  const delivery = await sendReport({
+    config,
+    summary,
+    attachments,
+    emailDue: isDailyEmailDue(summary.health, nowMs),
+    log,
+  });
   log.info(
     `daily report: ${summary.health}, ${problems.length} product(s) listed, ` +
       `delivered=${delivery.delivered}` +
@@ -113,7 +141,8 @@ async function handler(timer, context) {
 }
 
 app.timer('dailyReport', {
-  // 22:00 UTC = 08:00 AEST, so it lands before the team starts.
+  // 22:00 UTC = 08:00 AEST, so it lands before the team starts. Daily on
+  // purpose: the check runs every day, the OK email is what is weekly.
   schedule: '0 0 22 * * *',
   handler,
 });

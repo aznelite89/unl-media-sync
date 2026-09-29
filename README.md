@@ -361,7 +361,7 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `unleashedWebhook` | `POST /api/unleashed/product-webhook` (anonymous, HMAC-verified) | near-real-time sync on `product.created` / `product.updated` |
 | `reconcileMedia` | timer, every 10 min | re-reads the last `RECONCILE_LOOKBACK_MINUTES` — covers dropped deliveries and downtime |
 | `backfillMedia` | `GET|POST /api/unleashed/backfill` (function key) | operator runs: `?sku=`, `?since=YYYY-MM-DD`, `?all=true`, `&limit=`, `&dryRun=true` |
-| `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes and emails a health summary |
+| `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes every day, and the last 7 days on Monday. Emails a warning or alert the day it happens; a healthy `[OK]` summary is emailed on Monday only |
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 | `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
 | `customerUpkeep` | timer, every 15 min | undoes what the Shopify connector does to Unleashed customers on a website order: puts back wiped Notes ([Customer notes guard](#customer-notes-guard), `GUARD_CUSTOMER_NOTES`), then copies City into an empty Suburb ([Customer suburb fill](#customer-suburb-fill), `FILL_CUSTOMER_SUBURB`). Each part is a no-op until its setting is `true` |
@@ -465,6 +465,20 @@ pending, unmatched and capped products, and printing only the counts meant the
 answer to "which SKUs?" was in Application Insights, which is not where anyone
 was going to look.
 
+The check runs every day, but a healthy result is only **emailed on Monday at 08:00 AEST**
+(`OK_REPORT_WEEKDAY`), and Monday's check looks back **7 days** (`WEEKLY_LOOKBACK_HOURS`) so that
+one email covers the week. A warning or alert is emailed the day it happens, and every day's summary
+still reaches Application Insights whether or not it was emailed. Seven "nothing outstanding"
+emails a week were being read as noise. The cost is that the email is no longer a daily
+heartbeat: if the function app itself stops, the first sign is a Monday with no email.
+
+A week does not fit the 10-minute function timeout one product at a time: 587 products took 454s
+on 2026-09-29. The report checks `REPORT_SYNC_CONCURRENCY` (4) products at once — it only reads,
+and the time is network wait — which brought a 529-product week to 101s. The live sync stays
+sequential. If a week is ever too big even so, the check stops itself at `REPORT_SCAN_BUDGET_MS`
+(7 min) and the email says it did not finish and the counts are a lower bound, rather than the host
+killing it and no email arriving at all.
+
 The two-window check on activity is the point. A silent 24 hours is ordinary —
 weekends, holidays, a week nobody edits products — so alerting on it alone would
 fire most weekends and be filtered to trash before a real outage arrived. A
@@ -549,6 +563,7 @@ Deliveries older than 5 minutes are rejected.
 | `EMAIL_FROM` | `Searay Image Sync <no-reply@searay.net.au>` | must be on a domain verified in Resend |
 | `EMAIL_TO` | `info@`, `christina.l@`, `thongz0819@live.com` | comma-separated; changing recipients needs no redeploy |
 | `DAILY_LOOKBACK_HOURS` | `24` | daily verification window |
+| `WEEKLY_LOOKBACK_HOURS` | `168` | Monday's verification window — the week the one healthy email covers |
 | `PENDING_WARN_THRESHOLD` | `5` | pending products tolerated before the daily report warns |
 | `ZERO_ACTIVITY_PROBE_DAYS` | `7` | how far back a silent day is checked before it counts as a fault |
 | `FILL_CUSTOMER_SUBURB` | `false` | let the 15-minute timer write Suburb on customer addresses. Off so a deploy never starts editing customer records by itself; the CLI's `--apply` ignores it |

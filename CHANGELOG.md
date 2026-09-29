@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-09-29
+
+### Added
+- `WEEKLY_LOOKBACK_HOURS` setting (default `168`).
+- `reconcile` options `concurrency` and `budgetMs`; a budget stop is reported as `truncated` with the reason.
+- Daily report names the reason when its check did not finish.
+
+### Changed
+- `[OK] Image sync — nothing outstanding` email is sent weekly, Monday 08:00 AEST, instead of daily.
+- Monday's `dailyReport` pass checks the last 7 days; other days check the last 24 hours.
+- `dailyReport` still runs every day; WARN and ALERT emails are sent the day they happen.
+- Healthy daily summaries are logged to Application Insights on the days they are not emailed.
+- `dailyReport` checks 4 products at once and stops itself after 7 minutes; the live sync stays sequential.
+- Report window reads as "7 days" instead of "168h".
+
 ## 2026-09-28
 
 ### Added

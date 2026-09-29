@@ -4,6 +4,7 @@ import {
   DAILY_REPORTED_OUTCOMES,
   DUPLICATE_KIND,
   EMAIL_SUBJECT_TAG,
+  HOURS_PER_DAY,
   OUTCOME_LABEL,
   REPORT_NOTE_MAX_CHARS,
   SYNC_HEALTH,
@@ -33,9 +34,16 @@ import { csvCell, escapeHtml } from './email.js';
  *   pendingWarnThreshold: number,
  *   lookbackHours: number,
  *   activity?: { probeDays: number, probeCount: number } | null,
+ *   okEmailedWeekly?: boolean,
  * }} input
  */
-export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours, activity = null }) {
+export function buildDailySummary({
+  report,
+  pendingWarnThreshold,
+  lookbackHours,
+  activity = null,
+  okEmailedWeekly = false,
+}) {
   const byOutcome = report?.byOutcome ?? {};
   const scanned = report?.scanned ?? 0;
   const pending = byOutcome[SYNC_OUTCOME.DRY_RUN] ?? 0;
@@ -156,12 +164,12 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
       );
     } else if (activity) {
       reasons.push(
-        `No Unleashed changes in the last ${lookbackHours}h. Normal for a quiet day: ` +
+        `No Unleashed changes in the last ${describeWindow(lookbackHours)}. Normal for a quiet day: ` +
           `${activity.probeCount} product(s) changed in the last ${activity.probeDays} days, ` +
           'so Unleashed is reachable and the sync is watching it.',
       );
     } else {
-      reasons.push(`No Unleashed changes in the last ${lookbackHours}h.`);
+      reasons.push(`No Unleashed changes in the last ${describeWindow(lookbackHours)}.`);
     }
   }
 
@@ -181,11 +189,25 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
     ],
   ];
 
-  if (report?.truncated) {
+  if (typeof report?.truncated === 'string') {
+    reasons.push(
+      `The check did not finish — ${report.truncated}. These counts are a lower bound.`,
+    );
+  } else if (report?.truncated) {
     reasons.push('The check stopped early at its page cap, so these counts are a lower bound.');
   }
 
-  const title = `Image sync — last ${lookbackHours}h`;
+  // Said on the one email that does arrive, so six silent days read as healthy
+  // rather than as a report that has stopped.
+  if (okEmailedWeekly && health === SYNC_HEALTH.OK) {
+    reasons.push(
+      'This check runs every day. A healthy result is emailed on Monday mornings only, ' +
+        `covering the last ${describeWindow(lookbackHours)}; a warning or alert is emailed ` +
+        'the day it happens.',
+    );
+  }
+
+  const title = `Image sync — last ${describeWindow(lookbackHours)}`;
   const problems = collectProblems(report);
 
   return {
@@ -214,6 +236,17 @@ export function buildDailySummary({ report, pendingWarnThreshold, lookbackHours,
       problemHeading: DAILY_PROBLEM_HEADING,
     }),
   };
+}
+
+/**
+ * "24h" for a day, "7 days" for a week — whole days read as days once past one.
+ *
+ * @param {number} hours
+ */
+export function describeWindow(hours) {
+  return hours > HOURS_PER_DAY && hours % HOURS_PER_DAY === 0
+    ? `${hours / HOURS_PER_DAY} days`
+    : `${hours}h`;
 }
 
 /**

@@ -166,6 +166,57 @@ export const SYNC_HEALTH = {
   ALERT: 'alert',
 };
 
+/** `Date#getUTCDay()` numbering. */
+export const WEEKDAY = {
+  SUNDAY: 0,
+  MONDAY: 1,
+  TUESDAY: 2,
+  WEDNESDAY: 3,
+  THURSDAY: 4,
+  FRIDAY: 5,
+  SATURDAY: 6,
+};
+
+export const MS_PER_HOUR = 3_600_000;
+export const HOURS_PER_DAY = 24;
+
+/** AEST. Fixed, like the timer schedules: they are written in UTC and do not move with daylight saving. */
+export const REPORT_UTC_OFFSET_HOURS = 10;
+
+/**
+ * The weekly report day, in AEST: the one day a healthy pass is emailed, and the
+ * day the pass looks back a week instead of a day.
+ *
+ * The pass still runs every day and a WARN or ALERT is emailed the day it
+ * happens. Only the OK verdict waits for Monday: seven "nothing outstanding"
+ * emails a week were being read as noise, and a report that is filtered to
+ * trash cannot deliver the one alert that matters.
+ */
+export const OK_REPORT_WEEKDAY = WEEKDAY.MONDAY;
+
+/** How far back the Monday pass looks, so the one healthy email covers the week. */
+export const DEFAULT_WEEKLY_LOOKBACK_HOURS = 7 * HOURS_PER_DAY;
+
+/**
+ * Products the report checks at once. It only reads, and each product is two
+ * Shopify round trips, so a week is network wait: 587 products took 454s one at
+ * a time on 2026-09-29, most of the 10-minute `functionTimeout`. The live sync
+ * stays sequential.
+ */
+export const REPORT_SYNC_CONCURRENCY = 4;
+
+/**
+ * Wall-clock ceiling for the report's check, under `host.json`'s 10-minute
+ * `functionTimeout`. A host-killed invocation sends no email at all, so the
+ * check stops itself and the email says it is partial instead.
+ */
+export const REPORT_SCAN_BUDGET_MS = 7 * 60_000;
+
+/** Why a report was logged but not emailed. */
+export const REPORT_SKIP_REASON = {
+  OK_NOT_DUE: 'healthy report, emailed on Mondays only; logged only',
+};
+
 /** Products still needing a sync before a daily pass is considered unhealthy. */
 export const DEFAULT_PENDING_WARN_THRESHOLD = 5;
 

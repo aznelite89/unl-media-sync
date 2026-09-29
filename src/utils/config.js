@@ -1,5 +1,6 @@
 import {
   DEFAULT_DAILY_LOOKBACK_HOURS,
+  DEFAULT_WEEKLY_LOOKBACK_HOURS,
   DEFAULT_EMAIL_FROM,
   DEFAULT_EMAIL_TO,
   DEFAULT_MAX_MEDIA_PER_PRODUCT,
@@ -64,6 +65,11 @@ export function loadConfig(options = {}) {
     maxPages: readInt(process.env.RECONCILE_MAX_PAGES, RECONCILE_MAX_PAGES),
     /** Daily verification pass and where its summary is delivered. */
     dailyLookbackHours: readInt(process.env.DAILY_LOOKBACK_HOURS, DEFAULT_DAILY_LOOKBACK_HOURS),
+    /** Monday's window, so the one healthy email a week covers the whole week. */
+    weeklyLookbackHours: readInt(
+      process.env.WEEKLY_LOOKBACK_HOURS,
+      DEFAULT_WEEKLY_LOOKBACK_HOURS,
+    ),
     pendingWarnThreshold: readInt(
       process.env.PENDING_WARN_THRESHOLD,
       DEFAULT_PENDING_WARN_THRESHOLD,

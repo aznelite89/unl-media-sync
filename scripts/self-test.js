@@ -12,6 +12,7 @@ import {
   EMPTY_IMAGES_MAX_PER_RUN,
   MEDIA_ORIGIN,
   MEDIA_STATUS,
+  REPORT_SKIP_REASON,
   STATE_VERSION,
   SYNC_HEALTH,
   SYNC_OUTCOME,
@@ -24,9 +25,11 @@ import {
   buildDuplicateCsv,
   buildDuplicateSummary,
   collectProblems,
+  describeWindow,
   orderedProblemDetails,
 } from '../src/utils/report.js';
 import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
+import { isDailyEmailDue, isWeeklyReportDay, sendReport } from '../src/utils/notify.js';
 import {
   findDuplicateGroups,
   isForeignDuplicate,
@@ -1976,6 +1979,187 @@ test('real failures still outrank a quiet day', () => {
     activity: { probeDays: 7, probeCount: 99 },
   });
   assert.equal(s.health, SYNC_HEALTH.ALERT);
+});
+
+// --- a healthy report is emailed weekly, a fault the day it happens ------------
+
+// The timer fires at 22:00 UTC, which is 08:00 AEST on the following day.
+const SUNDAY_2200_UTC = Date.UTC(2026, 9, 4, 22); // Monday 5 Oct, 08:00 AEST
+const MONDAY_2200_UTC = Date.UTC(2026, 9, 5, 22); // Tuesday 6 Oct, 08:00 AEST
+
+test('a healthy report is emailed on Monday morning AEST', () => {
+  assert.equal(isDailyEmailDue(SYNC_HEALTH.OK, SUNDAY_2200_UTC), true);
+});
+
+test('a healthy report is not emailed on the other six days', () => {
+  for (let day = 0; day < 6; day += 1) {
+    const nowMs = MONDAY_2200_UTC + day * 86_400_000;
+    assert.equal(isDailyEmailDue(SYNC_HEALTH.OK, nowMs), false, `day ${day} after Monday`);
+  }
+});
+
+test('Monday is judged in AEST, not UTC', () => {
+  // Monday 22:00 UTC is already Tuesday morning for the people reading it.
+  assert.equal(new Date(MONDAY_2200_UTC).getUTCDay(), 1, 'a Monday in UTC');
+  assert.equal(isDailyEmailDue(SYNC_HEALTH.OK, MONDAY_2200_UTC), false);
+});
+
+test('a warning or alert is emailed whatever the day', () => {
+  for (let day = 0; day < 7; day += 1) {
+    const nowMs = SUNDAY_2200_UTC + day * 86_400_000;
+    assert.equal(isDailyEmailDue(SYNC_HEALTH.WARN, nowMs), true);
+    assert.equal(isDailyEmailDue(SYNC_HEALTH.ALERT, nowMs), true);
+  }
+});
+
+test('a report that is not due is still logged, and says why it was not sent', async () => {
+  const logged = [];
+  const log = { info: (line) => logged.push(line), warn: (line) => logged.push(line) };
+  const delivery = await sendReport({
+    // A key and a recipient, so only `emailDue` can be what stops the send.
+    config: { email: { apiKey: 'unused', from: 'a@example.com', to: ['b@example.com'] } },
+    summary: { health: SYNC_HEALTH.OK, subject: 'subject', text: 'body' },
+    emailDue: false,
+    log,
+  });
+  assert.deepEqual(delivery, { delivered: false, reason: REPORT_SKIP_REASON.OK_NOT_DUE });
+  assert.equal(logged.length, 1, 'the summary still reaches the log');
+  assert.ok(logged[0].includes('body'));
+});
+
+test('the weekly healthy email says the check still runs daily', () => {
+  const weekly = buildDailySummary({
+    report: { scanned: 100, withImages: 60, byOutcome: { unchanged: 60 }, details: [] },
+    pendingWarnThreshold: 5,
+    lookbackHours: 24,
+    okEmailedWeekly: true,
+  });
+  assert.equal(weekly.health, SYNC_HEALTH.OK);
+  assert.ok(weekly.text.includes('Monday mornings only'));
+
+  const faulty = buildDailySummary({
+    report: { scanned: 100, withImages: 60, byOutcome: { failed: 1 }, details: [] },
+    pendingWarnThreshold: 5,
+    lookbackHours: 24,
+    okEmailedWeekly: true,
+  });
+  assert.ok(!faulty.text.includes('Monday mornings only'), 'an alert is not a weekly email');
+});
+
+test('Monday is the weekly report day, and the only one', () => {
+  assert.equal(isWeeklyReportDay(SUNDAY_2200_UTC), true);
+  for (let day = 1; day < 7; day += 1) {
+    assert.equal(isWeeklyReportDay(SUNDAY_2200_UTC + day * 86_400_000), false);
+  }
+});
+
+test('the report window reads in days once it is a whole number of them', () => {
+  assert.equal(describeWindow(24), '24h');
+  assert.equal(describeWindow(36), '36h');
+  assert.equal(describeWindow(168), '7 days');
+});
+
+test('the Monday email is titled and footed with the week it covers', () => {
+  const s = buildDailySummary({
+    report: { scanned: 587, withImages: 517, byOutcome: { unchanged: 587 }, details: [] },
+    pendingWarnThreshold: 5,
+    lookbackHours: 168,
+    okEmailedWeekly: true,
+  });
+  assert.ok(s.text.includes('Image sync — last 7 days'));
+  assert.ok(s.text.includes('covering the last 7 days'));
+  assert.ok(!s.text.includes('168h'));
+});
+
+test('a check that ran out of time says so, with the reason', () => {
+  const s = summaryOf(
+    { unchanged: 10 },
+    { truncated: 'stopped after 10 product(s): the 420s time budget ran out' },
+  );
+  assert.ok(s.text.includes('did not finish — stopped after 10 product(s)'));
+  assert.ok(s.text.includes('lower bound'));
+  assert.ok(!s.text.includes('page cap'), 'not blamed on the page cap');
+});
+
+/** Unleashed products with images that no Shopify variant carries: two quick reads each. */
+const unmatchedProducts = (n) =>
+  Array.from({ length: n }, (_, i) => ({
+    ProductCode: `U-${i}`,
+    Guid: `u${i}`,
+    Images: [{ Url: `https://unl/${i}.png`, IsDefault: true }],
+  }));
+
+/** Shopify stub that records how many lookups overlap. */
+const overlapShopify = () => {
+  const seen = { inFlight: 0, max: 0, calls: 0 };
+  return {
+    seen,
+    async findProductsBySku() {
+      seen.calls += 1;
+      seen.inFlight += 1;
+      seen.max = Math.max(seen.max, seen.inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      seen.inFlight -= 1;
+      return { products: [] };
+    },
+  };
+};
+
+test('the live sync still checks one product at a time', async () => {
+  const shopify = overlapShopify();
+  const report = await reconcile({
+    unleashed: unleashedStub(unmatchedProducts(6)),
+    shopify,
+    config: DUP_CONFIG,
+    log: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(shopify.seen.max, 1);
+  assert.equal(report.byOutcome.unmatched, 6);
+});
+
+test('the report checks several products at once, never more than asked', async () => {
+  const shopify = overlapShopify();
+  const report = await reconcile({
+    unleashed: unleashedStub(unmatchedProducts(12)),
+    shopify,
+    config: DUP_CONFIG,
+    concurrency: 4,
+    log: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(shopify.seen.max, 4);
+  assert.equal(shopify.seen.calls, 12, 'every product checked once');
+  assert.equal(report.byOutcome.unmatched, 12, 'every result kept');
+  assert.equal(report.truncated, false);
+});
+
+test('a limit still holds when products are checked concurrently', async () => {
+  const shopify = overlapShopify();
+  const report = await reconcile({
+    unleashed: unleashedStub(unmatchedProducts(12)),
+    shopify,
+    config: DUP_CONFIG,
+    concurrency: 4,
+    limit: 5,
+    log: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(shopify.seen.calls, 5);
+  assert.equal(report.truncated, true);
+});
+
+test('a check out of time stops itself and says why, rather than being killed', async () => {
+  const warnings = [];
+  const shopify = overlapShopify();
+  const report = await reconcile({
+    unleashed: unleashedStub(unmatchedProducts(3)),
+    shopify,
+    config: DUP_CONFIG,
+    budgetMs: 0,
+    log: { info() {}, warn: (m) => warnings.push(m), error() {} },
+  });
+  assert.equal(shopify.seen.calls, 0);
+  assert.equal(report.scanned, 0);
+  assert.ok(report.truncated.includes('time budget ran out'));
+  assert.ok(warnings.some((m) => m.includes('time budget')));
 });
 
 // --- weekly catalogue audit ---------------------------------------------------

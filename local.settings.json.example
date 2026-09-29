@@ -23,6 +23,7 @@
     "EMAIL_FROM": "Searay Image Sync <no-reply@searay.net.au>",
     "EMAIL_TO": "info@searay.net.au,christina.l@searay.net.au,thongz0819@live.com",
     "DAILY_LOOKBACK_HOURS": "24",
+    "WEEKLY_LOOKBACK_HOURS": "168",
     "PENDING_WARN_THRESHOLD": "5",
     "ZERO_ACTIVITY_PROBE_DAYS": "7"
   }
