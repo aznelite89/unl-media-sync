@@ -75,7 +75,7 @@ for (const row of report.specials) {
 console.log('\nTag changes:');
 for (const result of report.results) {
   console.log(
-    `  ${result.action.padEnd(9)} ${result.outcome.padEnd(9)} ${result.code.padEnd(18)} ` +
+    `  ${(result.action ?? result.outcome).padEnd(9)} ${result.outcome.padEnd(9)} ${result.code.padEnd(18)} ` +
       `${result.title || result.productId}${result.error ? `  — ${result.error}` : ''}`,
   );
 }

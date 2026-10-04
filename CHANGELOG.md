@@ -15,6 +15,9 @@
 - Shopify client: `listAllVariantSkus` entries carry `hasImage`.
 - Self-tests for the products-without-images report.
 
+### Fixed
+- `scripts/weekly-specials-cli.js --apply` no longer crashes printing successful tag changes.
+
 ### Changed
 - New Arrivals tag and collection-order helpers shared with This Week Specials (`applyTagChanges`, `orderCollection`, `newestFirst` take the date to order by).
 
