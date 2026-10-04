@@ -16,6 +16,7 @@ import {
   STATE_VERSION,
   SYNC_HEALTH,
   SYNC_OUTCOME,
+  WEBSITE_IMAGE_STATUS,
 } from '../src/constants/index.js';
 import {
   buildAuditCsv,
@@ -24,11 +25,14 @@ import {
   buildDailySummary,
   buildDuplicateCsv,
   buildDuplicateSummary,
+  buildMissingImagesCsv,
+  buildMissingImagesSummary,
   collectProblems,
   describeWindow,
   orderedProblemDetails,
 } from '../src/utils/report.js';
 import { diffCatalogue, findNearMiss, buildPrefixIndex } from '../src/utils/audit.js';
+import { auditMissingImages, findMissingImages } from '../src/utils/missingImages.js';
 import { isDailyEmailDue, isWeeklyReportDay, sendReport } from '../src/utils/notify.js';
 import {
   findDuplicateGroups,
@@ -65,6 +69,27 @@ import {
   sameNotes,
 } from '../src/utils/customerNotesPlan.js';
 import { createMemoryNotesStore } from '../src/utils/customerNotesStore.js';
+import { NEW_ARRIVAL_OUTCOME, NEW_ARRIVAL_TAG } from '../src/constants/index.js';
+import {
+  newArrivalCutoff,
+  newestFirst,
+  planNewArrivals,
+  recentCodes,
+  reorderMoves,
+} from '../src/utils/newArrivalsPlan.js';
+import { syncNewArrivals } from '../src/utils/newArrivals.js';
+import { SPECIAL_CATEGORY, WEEKLY_SPECIAL_TAG } from '../src/constants/index.js';
+import {
+  designFamily,
+  landedDates,
+  planWeeklySpecials,
+  specialCategory,
+} from '../src/utils/weeklySpecialsPlan.js';
+import { syncWeeklySpecials } from '../src/utils/weeklySpecials.js';
+import {
+  buildUndatedSpecialsCsv,
+  buildWeeklySpecialsSummary,
+} from '../src/utils/report.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -2637,6 +2662,502 @@ test('force restore puts back text the guard classed as cleared', async () => {
   assert.equal(result.outcome, NOTES_OUTCOME.RESTORED);
   assert.equal(unleashed.byGuid.get(MB712_GUID).Notes, JIAN_NOTE);
   assert.equal(store.peek().customers[MB712_GUID].clearedAt, undefined);
+});
+
+// --- New Arrivals ---------------------------------------------------------
+
+const NA_NOW = Date.UTC(2026, 9, 2, 4, 0, 0);
+const naDate = (y, m, d) => `/Date(${Date.UTC(y, m - 1, d)})/`;
+const naSku = (productId, productCount = 1) => ({ productId, title: productId, productCount });
+
+test('the cutoff is six calendar months back', () => {
+  assert.equal(new Date(newArrivalCutoff(NA_NOW, 6)).toISOString(), '2026-04-02T04:00:00.000Z');
+});
+
+test('only non-obsolete products created on or after the cutoff are recent', () => {
+  const cutoff = newArrivalCutoff(NA_NOW, 6);
+  const recent = recentCodes(
+    [
+      { ProductCode: '9KBELY06060CM', CreatedOn: naDate(2026, 8, 3) },
+      { ProductCode: 'MS530', CreatedOn: naDate(2024, 3, 1) },
+      { ProductCode: 'OLDNEW', CreatedOn: naDate(2026, 9, 1), Obsolete: true },
+      { ProductCode: 'NODATE' },
+    ],
+    cutoff,
+  );
+  assert.deepEqual([...recent.keys()], ['9kbely06060cm']);
+});
+
+test('plan tags new products, untags aged-out ones, and leaves settled ones alone', () => {
+  const recent = new Map([['a1', 3], ['b1', 2]]);
+  const skus = new Map([['a1', naSku('P_A')], ['b1', naSku('P_B')], ['old', naSku('P_OLD')]]);
+  const plan = planNewArrivals({ recent, skus, tagged: new Set(['P_B', 'P_OLD']) });
+  assert.deepEqual(plan.add.map((e) => e.productId), ['P_A']);
+  assert.deepEqual(plan.remove, ['P_OLD']);
+  assert.deepEqual(plan.heldRemovals, []);
+});
+
+test('a product dates from its newest variant code', () => {
+  const recent = new Map([['a-45', 100], ['a-50', 300]]);
+  const skus = new Map([['a-45', naSku('P_A')], ['a-50', naSku('P_A')]]);
+  const plan = planNewArrivals({ recent, skus, tagged: new Set() });
+  assert.equal(plan.wanted.get('P_A').createdMs, 300);
+  assert.equal(plan.add.length, 1);
+});
+
+test('unmatched and ambiguous codes are reported, not tagged', () => {
+  const recent = new Map([['nowhere', 1], ['twice', 1]]);
+  const skus = new Map([['twice', naSku('P_X', 2)]]);
+  const plan = planNewArrivals({ recent, skus, tagged: new Set() });
+  assert.deepEqual(plan.unmatched, ['nowhere']);
+  assert.deepEqual(plan.ambiguous, ['twice']);
+  assert.equal(plan.add.length, 0);
+});
+
+test('a mass untag is held back as a short read, unless forced', () => {
+  const tagged = new Set(Array.from({ length: 40 }, (_, i) => `P${i}`));
+  const recent = new Map([['keep', 1]]);
+  const skus = new Map([['keep', naSku('P0')]]);
+  const held = planNewArrivals({ recent, skus, tagged });
+  assert.equal(held.remove.length, 0);
+  assert.equal(held.heldRemovals.length, 39);
+  const forced = planNewArrivals({ recent, skus, tagged, force: true });
+  assert.equal(forced.remove.length, 39);
+});
+
+test('a few products ageing out of a small list is not held back', () => {
+  const tagged = new Set(['P1', 'P2', 'P3']);
+  const plan = planNewArrivals({ recent: new Map(), skus: new Map(), tagged });
+  assert.equal(plan.remove.length, 3);
+});
+
+test('collection order is newest first, unknown products last in their old order', () => {
+  const wanted = new Map([['A', { createdMs: 1 }], ['B', { createdMs: 3 }], ['C', { createdMs: 2 }]]);
+  assert.deepEqual(newestFirst(['X', 'A', 'Y', 'B', 'C'], wanted), ['B', 'C', 'A', 'X', 'Y']);
+});
+
+test('reorder moves start at the first difference and cover the rest', () => {
+  assert.deepEqual(reorderMoves(['A', 'B', 'C'], ['A', 'B', 'C']), []);
+  assert.deepEqual(reorderMoves(['A', 'C', 'B'], ['A', 'B', 'C']), [
+    { id: 'B', newPosition: '1' },
+    { id: 'C', newPosition: '2' },
+  ]);
+});
+
+function fakeNewArrivalsShopify({ tagged = [], skus = new Map(), collection = null } = {}) {
+  const calls = { add: [], remove: [], reorder: [] };
+  return {
+    calls,
+    async listAllVariantSkus() {
+      return skus;
+    },
+    async listProductIdsWithTag(tag) {
+      assert.equal(tag, NEW_ARRIVAL_TAG);
+      return new Set(tagged);
+    },
+    async addTags({ productId }) {
+      calls.add.push(productId);
+    },
+    async removeTags({ productId }) {
+      calls.remove.push(productId);
+    },
+    async getCollectionProducts() {
+      return collection;
+    },
+    async reorderCollection({ moves }) {
+      calls.reorder.push(...moves);
+    },
+  };
+}
+
+function fakeNewArrivalsUnleashed(pages) {
+  return {
+    async *iterateProducts() {
+      for (const [index, items] of pages.entries()) {
+        yield { items, pageNumber: index + 1, totalPages: pages.length };
+      }
+    },
+  };
+}
+
+const NA_CONFIG = { newArrivalMonths: 6, newArrivalCollectionHandle: 'new-arrivals', dryRun: false };
+
+test('syncNewArrivals tags, untags and orders a manual collection', async () => {
+  const unleashed = fakeNewArrivalsUnleashed([
+    [
+      { ProductCode: 'NEW1', CreatedOn: naDate(2026, 9, 1) },
+      { ProductCode: 'NEW2', CreatedOn: naDate(2026, 5, 1) },
+    ],
+  ]);
+  const shopify = fakeNewArrivalsShopify({
+    tagged: ['P_NEW2', 'P_OLD'],
+    skus: new Map([['new1', naSku('P_NEW1')], ['new2', naSku('P_NEW2')]]),
+    collection: { id: 'C1', sortOrder: 'MANUAL', rules: [], productIds: ['P_NEW2', 'P_NEW1'] },
+  });
+  const report = await syncNewArrivals({
+    unleashed, shopify, config: NA_CONFIG, log: QUIET_LOG, apply: true, nowMs: NA_NOW, settleMs: 0,
+  });
+  assert.deepEqual(shopify.calls.add, ['P_NEW1']);
+  assert.deepEqual(shopify.calls.remove, ['P_OLD']);
+  assert.deepEqual(shopify.calls.reorder.map((m) => m.id), ['P_NEW1', 'P_NEW2']);
+  assert.equal(report.byOutcome[NEW_ARRIVAL_OUTCOME.TAGGED], 1);
+  assert.equal(report.byOutcome[NEW_ARRIVAL_OUTCOME.UNTAGGED], 1);
+});
+
+test('syncNewArrivals writes nothing without apply, or under DRY_RUN', async () => {
+  for (const [apply, dryRun] of [[false, false], [true, true]]) {
+    const shopify = fakeNewArrivalsShopify({
+      skus: new Map([['new1', naSku('P_NEW1')]]),
+      collection: { id: 'C1', sortOrder: 'MANUAL', rules: [], productIds: ['P_X', 'P_NEW1'] },
+    });
+    const report = await syncNewArrivals({
+      unleashed: fakeNewArrivalsUnleashed([[{ ProductCode: 'NEW1', CreatedOn: naDate(2026, 9, 1) }]]),
+      shopify, config: { ...NA_CONFIG, dryRun }, log: QUIET_LOG, apply, nowMs: NA_NOW, settleMs: 0,
+    });
+    assert.equal(shopify.calls.add.length + shopify.calls.remove.length + shopify.calls.reorder.length, 0);
+    assert.equal(report.byOutcome[NEW_ARRIVAL_OUTCOME.DRY_RUN], 1);
+  }
+});
+
+test('a collection not sorted manually is left alone', async () => {
+  const shopify = fakeNewArrivalsShopify({
+    tagged: ['P_NEW1'],
+    skus: new Map([['new1', naSku('P_NEW1')]]),
+    collection: { id: 'C1', sortOrder: 'BEST_SELLING', rules: [], productIds: ['P_X', 'P_NEW1'] },
+  });
+  const report = await syncNewArrivals({
+    unleashed: fakeNewArrivalsUnleashed([[{ ProductCode: 'NEW1', CreatedOn: naDate(2026, 9, 1) }]]),
+    shopify, config: NA_CONFIG, log: QUIET_LOG, apply: true, nowMs: NA_NOW, settleMs: 0,
+  });
+  assert.equal(shopify.calls.reorder.length, 0);
+  assert.match(report.ordering.status, /BEST_SELLING/);
+});
+
+test('an Unleashed walk that stops short throws instead of untagging', async () => {
+  const unleashed = {
+    async *iterateProducts() {
+      yield { items: [{ ProductCode: 'NEW1', CreatedOn: naDate(2026, 9, 1) }], pageNumber: 1, totalPages: 3 };
+    },
+  };
+  const shopify = fakeNewArrivalsShopify({ tagged: ['P_A', 'P_B'] });
+  await assert.rejects(
+    syncNewArrivals({ unleashed, shopify, config: NA_CONFIG, log: QUIET_LOG, apply: true, nowMs: NA_NOW, settleMs: 0 }),
+    /stopped at page 1 of 3/,
+  );
+  assert.equal(shopify.calls.remove.length, 0);
+});
+
+// --- weekly products without images -------------------------------------------
+
+const MI_CUTOFF = newArrivalCutoff(NA_NOW, 12);
+const miSkus = new Map([
+  ['bare1', { productId: 'P1', title: 'Bare ring', productCount: 1, hasImage: false }],
+  ['hand1', { productId: 'P2', title: 'Hand ring', productCount: 1, hasImage: true }],
+]);
+
+test('only products created inside the window with no image are listed', () => {
+  const result = findMissingImages({
+    products: [
+      { ProductCode: 'BARE1', CreatedOn: naDate(2026, 8, 1), Images: [] },
+      { ProductCode: 'PHOTO1', CreatedOn: naDate(2026, 8, 1), Images: [{ Url: 'a.jpg' }] },
+      { ProductCode: 'OLD1', CreatedOn: naDate(2024, 3, 1), Images: [] },
+      { ProductCode: 'GONE1', CreatedOn: naDate(2026, 8, 1), Images: [], Obsolete: true },
+      { ProductCode: 'NODATE', Images: [] },
+    ],
+    skus: miSkus,
+    cutoffMs: MI_CUTOFF,
+  });
+  assert.equal(result.recent, 2);
+  assert.equal(result.withImages, 1);
+  assert.deepEqual(result.missing.map((row) => row.productCode), ['BARE1']);
+  assert.equal(result.missing[0].created, '2026-08-01');
+});
+
+test('products bare on the website come first, then newest first', () => {
+  const result = findMissingImages({
+    products: [
+      { ProductCode: 'OFFSITE', CreatedOn: naDate(2026, 9, 20) },
+      { ProductCode: 'HAND1', CreatedOn: naDate(2026, 9, 10) },
+      { ProductCode: 'OFFSITE2', CreatedOn: naDate(2026, 9, 25) },
+      { ProductCode: 'BARE1', CreatedOn: naDate(2026, 1, 5) },
+    ],
+    skus: miSkus,
+    cutoffMs: MI_CUTOFF,
+  });
+  assert.deepEqual(
+    result.missing.map((row) => [row.productCode, row.status]),
+    [
+      ['BARE1', WEBSITE_IMAGE_STATUS.LISTED_NO_IMAGE],
+      ['HAND1', WEBSITE_IMAGE_STATUS.LISTED_HAS_IMAGE],
+      ['OFFSITE2', WEBSITE_IMAGE_STATUS.NOT_LISTED],
+      ['OFFSITE', WEBSITE_IMAGE_STATUS.NOT_LISTED],
+    ],
+  );
+  assert.equal(result.missing[0].websiteTitle, 'Bare ring');
+});
+
+test('the missing-image check reads 12 months back and reports the cutoff', async () => {
+  let asked;
+  const unleashed = {
+    async *iterateProducts(options) {
+      asked = options;
+      yield {
+        items: [{ ProductCode: 'BARE1', ProductDescription: 'Ring', CreatedOn: naDate(2026, 8, 1), Images: [] }],
+        pageNumber: 1,
+        totalPages: 1,
+      };
+    },
+  };
+  const shopify = { async listAllVariantSkus() { return miSkus; } };
+  const audit = await auditMissingImages({ unleashed, shopify, config: { missingImageMonths: 12 }, nowMs: NA_NOW });
+  assert.equal(asked.sinceIso, '2025-10-02T04:00:00');
+  assert.equal(audit.cutoff, '2025-10-02');
+  assert.equal(audit.missing.length, 1);
+});
+
+test('the missing-image email carries the count in the subject and a CSV', () => {
+  const audit = {
+    months: 12,
+    cutoff: '2025-10-02',
+    recent: 40,
+    withImages: 38,
+    missing: [
+      { productCode: 'BARE1', description: 'Ring "special", 9ct', created: '2026-08-01', status: WEBSITE_IMAGE_STATUS.LISTED_NO_IMAGE, websiteTitle: 'Bare ring' },
+      { productCode: 'OFFSITE', description: 'Chain', created: '2026-09-20', status: WEBSITE_IMAGE_STATUS.NOT_LISTED, websiteTitle: '' },
+    ],
+  };
+  const summary = buildMissingImagesSummary({ audit });
+  assert.equal(summary.health, SYNC_HEALTH.WARN);
+  assert.ok(summary.subject.includes('2 product(s) need an image uploaded'));
+  assert.ok(summary.text.includes('BARE1  on website, no image'));
+  assert.ok(summary.html.includes('Products needing an image'));
+
+  const rows = buildMissingImagesCsv(audit).split('\n');
+  assert.equal(rows[0], 'product_code,description,created,website,website_title');
+  assert.ok(rows[1].includes('"Ring ""special"", 9ct"'));
+  assert.ok(rows[2].endsWith('not on website,'));
+});
+
+test('no missing images is OK; a window with no images at all is called out', () => {
+  const clean = buildMissingImagesSummary({
+    audit: { months: 12, cutoff: '2025-10-02', recent: 5, withImages: 5, missing: [] },
+  });
+  assert.equal(clean.health, SYNC_HEALTH.OK);
+  assert.ok(clean.text.includes('Nothing to action'));
+
+  const suspect = buildMissingImagesSummary({
+    audit: {
+      months: 12, cutoff: '2025-10-02', recent: 1, withImages: 0,
+      missing: [{ productCode: 'X', description: '', created: '2026-08-01', status: WEBSITE_IMAGE_STATUS.NOT_LISTED, websiteTitle: '' }],
+    },
+  });
+  assert.ok(suspect.text.includes('Check before acting'));
+});
+
+// --- This Week Specials ---------------------------------------------------
+
+const WS_NOW = Date.UTC(2026, 9, 5, 0, 0, 0);
+const WS_CUTOFF = newArrivalCutoff(WS_NOW, 18);
+const WS_DAY = 86_400_000;
+const wsDate = (y, m, d) => `/Date(${Date.UTC(y, m - 1, d)})/`;
+const wsSku = (productId, productType, extra = {}) => ({
+  productId, title: productId, productCount: 1, productType, onWebsite: true, ...extra,
+});
+
+/** One qualifying product per code unless the overrides say otherwise. */
+function wsInput({ rows, tagged = [], perCategory = 2 }) {
+  const products = [];
+  const daysSinceSale = new Map();
+  const warehouseQty = new Map();
+  const landed = new Map();
+  const skus = new Map();
+  for (const row of rows) {
+    const code = row.code.toLowerCase();
+    products.push({ ProductCode: row.code, CreatedOn: row.created ?? wsDate(2024, 3, 1), ProductDescription: row.code });
+    daysSinceSale.set(code, row.daysSinceSale ?? null);
+    warehouseQty.set(code, row.qty ?? 1);
+    if (row.landedMs !== null) landed.set(code, row.landedMs ?? WS_NOW - 30 * WS_DAY);
+    skus.set(code, wsSku(row.productId ?? `P_${row.code}`, row.type ?? 'Rings', row.sku ?? {}));
+  }
+  return {
+    products, daysSinceSale, warehouseQty, landed, skus, tagged: new Set(tagged),
+    nowMs: WS_NOW, cutoffMs: WS_CUTOFF, perCategory,
+  };
+}
+
+test('product types map to the four categories, earrings before rings', () => {
+  assert.equal(specialCategory('Diamond Huggies'), SPECIAL_CATEGORY.EARRINGS);
+  assert.equal(specialCategory('Earrings'), SPECIAL_CATEGORY.EARRINGS);
+  assert.equal(specialCategory('Semi-Mount Rings'), SPECIAL_CATEGORY.RINGS);
+  assert.equal(specialCategory('Bangles (No Stones)'), SPECIAL_CATEGORY.CHAINS_BRACELETS);
+  assert.equal(specialCategory('Diamond Necklets'), SPECIAL_CATEGORY.CHAINS_BRACELETS);
+  assert.equal(specialCategory('Lockets'), SPECIAL_CATEGORY.PENDANTS);
+  assert.equal(specialCategory('Findings'), null);
+});
+
+test('chain lengths, ring sizes and pendant letters are one design', () => {
+  assert.equal(designFamily('9KBELY05950CM'), designFamily('9KBELY05945CM'));
+  assert.equal(designFamily('9KSR034SIZEP'), designFamily('9KSR034SIZEM'));
+  assert.equal(designFamily('9KDLW3C', 'Letter Pendants'), designFamily('9KDLW3R', 'Letter Pendants'));
+  assert.notEqual(designFamily('9KDP626', 'Diamond Pendants'), designFamily('9KDP62', 'Diamond Pendants'));
+});
+
+test('landed date is the latest receipt that received the code', () => {
+  const landed = landedDates([
+    { ReceivedDate: wsDate(2025, 1, 1), PurchaseOrderLines: [{ Product: { ProductCode: 'A' }, ReceiptQuantity: 2 }] },
+    { ReceivedDate: wsDate(2026, 2, 1), PurchaseOrderLines: [{ Product: { ProductCode: 'A' }, ReceiptQuantity: 1 }] },
+    { ReceivedDate: wsDate(2026, 5, 1), PurchaseOrderLines: [{ Product: { ProductCode: 'B' }, ReceiptQuantity: 0 }] },
+    { ReceivedDate: null, PurchaseOrderLines: [{ Product: { ProductCode: 'C' }, ReceiptQuantity: 3 }] },
+  ]);
+  assert.equal(landed.get('a'), Date.UTC(2026, 1, 1));
+  assert.equal(landed.has('b'), false);
+  assert.equal(landed.has('c'), false);
+});
+
+test('specials skip recent sales, new products, no warehouse stock and hidden products', () => {
+  const plan = planWeeklySpecials(wsInput({
+    perCategory: 10,
+    rows: [
+      { code: 'OK1' },
+      { code: 'NEVERSOLD', daysSinceSale: null },
+      { code: 'SOLDLONGAGO', daysSinceSale: 600 },
+      { code: 'SOLDRECENT', daysSinceSale: 100 },
+      { code: 'NEWPRODUCT', created: wsDate(2026, 1, 1) },
+      { code: 'NOSTOCK', qty: 0 },
+      { code: 'HIDDEN', sku: { onWebsite: false } },
+      { code: 'FINDING', type: 'Findings' },
+    ],
+  }));
+  assert.deepEqual([...plan.wanted.keys()].sort(), ['P_NEVERSOLD', 'P_OK1', 'P_SOLDLONGAGO']);
+});
+
+test('a product with one size sold recently is not a special', () => {
+  const plan = planWeeklySpecials(wsInput({
+    rows: [
+      { code: 'R1SIZEM', productId: 'P_R1' },
+      { code: 'R1SIZEP', productId: 'P_R1', daysSinceSale: 20, qty: 0 },
+    ],
+  }));
+  assert.equal(plan.wanted.size, 0);
+});
+
+test('specials are most recently landed first, capped per category, one per design', () => {
+  const plan = planWeeklySpecials(wsInput({
+    perCategory: 2,
+    rows: [
+      { code: 'OLD', landedMs: WS_NOW - 300 * WS_DAY },
+      { code: 'NEW', landedMs: WS_NOW - 10 * WS_DAY },
+      { code: 'MID', landedMs: WS_NOW - 100 * WS_DAY },
+      { code: 'CH01045CM', type: 'Curb Chains', landedMs: WS_NOW - 5 * WS_DAY },
+      { code: 'CH01050CM', type: 'Curb Chains', landedMs: WS_NOW - 6 * WS_DAY },
+    ],
+  }));
+  assert.deepEqual([...plan.wanted.keys()], ['P_CH01045CM', 'P_NEW', 'P_MID']);
+  assert.deepEqual(plan.shortfalls.map((s) => [s.category, s.picked]), [
+    [SPECIAL_CATEGORY.CHAINS_BRACELETS, 1],
+    [SPECIAL_CATEGORY.EARRINGS, 0],
+    [SPECIAL_CATEGORY.PENDANTS, 0],
+  ]);
+});
+
+test('qualifying stock with no landed date is listed for the office, not picked', () => {
+  const plan = planWeeklySpecials(wsInput({ rows: [{ code: 'UNDATED', landedMs: null }, { code: 'DATED' }] }));
+  assert.deepEqual([...plan.wanted.keys()], ['P_DATED']);
+  assert.deepEqual(plan.undated.map((row) => row.productCodes), [['UNDATED']]);
+  assert.equal(plan.qualifying, 2);
+});
+
+test("specials replace last week's tags; an empty pick keeps them unless forced", () => {
+  const swap = planWeeklySpecials(wsInput({ rows: [{ code: 'A' }], tagged: ['P_A', 'P_LAST'] }));
+  assert.deepEqual(swap.add, []);
+  assert.deepEqual(swap.remove, ['P_LAST']);
+  const empty = planWeeklySpecials(wsInput({ rows: [], tagged: ['P_LAST'] }));
+  assert.deepEqual(empty.remove, []);
+  assert.deepEqual(empty.heldRemovals, ['P_LAST']);
+  const forced = planWeeklySpecials({ ...wsInput({ rows: [], tagged: ['P_LAST'] }), force: true });
+  assert.deepEqual(forced.remove, ['P_LAST']);
+});
+
+test('syncWeeklySpecials tags, untags and orders by landed date', async () => {
+  const calls = { add: [], remove: [], reorder: [] };
+  const recent = WS_NOW - 5 * WS_DAY;
+  const older = WS_NOW - 50 * WS_DAY;
+  const unleashed = {
+    async listProducts() {
+      return [
+        { ProductCode: 'RA', CreatedOn: wsDate(2024, 3, 1) },
+        { ProductCode: 'RB', CreatedOn: wsDate(2024, 3, 1) },
+      ];
+    },
+    async listStockOnHand({ warehouseCode } = {}) {
+      return warehouseCode
+        ? [{ ProductCode: 'RA', QtyOnHand: 1 }, { ProductCode: 'RB', QtyOnHand: 2 }]
+        : [{ ProductCode: 'RA', DaysSinceLastSale: null }, { ProductCode: 'RB', DaysSinceLastSale: 700 }];
+    },
+    async listPurchaseOrders() {
+      return [
+        { ReceivedDate: `/Date(${older})/`, PurchaseOrderLines: [{ Product: { ProductCode: 'RA' }, ReceiptQuantity: 1 }] },
+        { ReceivedDate: `/Date(${recent})/`, PurchaseOrderLines: [{ Product: { ProductCode: 'RB' }, ReceiptQuantity: 1 }] },
+      ];
+    },
+  };
+  const shopify = {
+    async listAllVariantSkus() {
+      return new Map([['ra', wsSku('P_RA', 'Rings')], ['rb', wsSku('P_RB', 'Diamond Rings')]]);
+    },
+    async listProductIdsWithTag(tag) {
+      assert.equal(tag, WEEKLY_SPECIAL_TAG);
+      return new Set(['P_LAST']);
+    },
+    async addTags({ productId, tags }) {
+      assert.deepEqual(tags, [WEEKLY_SPECIAL_TAG]);
+      calls.add.push(productId);
+    },
+    async removeTags({ productId }) {
+      calls.remove.push(productId);
+    },
+    async getCollectionProducts() {
+      return { id: 'C', sortOrder: 'MANUAL', rules: [], productIds: ['P_RA', 'P_RB'] };
+    },
+    async reorderCollection({ moves }) {
+      calls.reorder.push(...moves);
+    },
+  };
+  const config = {
+    weeklySpecialsUnsoldMonths: 18, weeklySpecialsPerCategory: 12, weeklySpecialsWarehouse: 'WH',
+    weeklySpecialsCollectionHandle: 'sale', dryRun: false,
+  };
+  const report = await syncWeeklySpecials({
+    unleashed, shopify, config, log: QUIET_LOG, apply: true, nowMs: WS_NOW, settleMs: 0,
+  });
+  assert.deepEqual(calls.add.sort(), ['P_RA', 'P_RB']);
+  assert.deepEqual(calls.remove, ['P_LAST']);
+  assert.deepEqual(calls.reorder.map((m) => m.id), ['P_RB', 'P_RA']);
+  assert.deepEqual(report.specials.map((row) => row.code), ['RB', 'RA']);
+
+  const dry = await syncWeeklySpecials({
+    unleashed, shopify, config: { ...config, dryRun: true }, log: QUIET_LOG, apply: true, nowMs: WS_NOW, settleMs: 0,
+  });
+  assert.equal(calls.add.length, 2);
+  assert.equal(dry.dryRun, true);
+});
+
+test('the specials email warns on undated stock and shortfalls, and lists them', () => {
+  const summary = buildWeeklySpecialsSummary({
+    report: {
+      perCategory: 12, warehouse: 'WH', unsoldSince: '2025-04-05', qualifying: 3,
+      specials: [{ category: SPECIAL_CATEGORY.RINGS, code: 'R', title: 'Ring', landed: '2026-01-01' }],
+      undated: [{ category: SPECIAL_CATEGORY.PENDANTS, productCodes: ['9KX1'], title: 'Cross', description: '' }],
+      shortfalls: [{ category: SPECIAL_CATEGORY.EARRINGS, picked: 0, wanted: 12 }],
+      results: [], heldRemovals: [],
+    },
+  });
+  assert.equal(summary.health, SYNC_HEALTH.WARN);
+  assert.ok(summary.subject.includes('1 need a landed date'));
+  assert.ok(summary.text.includes('Earrings: only 0 of 12'));
+  assert.ok(summary.text.includes('9KX1'));
+  assert.ok(buildUndatedSpecialsCsv({ undated: [{ category: SPECIAL_CATEGORY.PENDANTS, productCodes: ['A', 'B'], title: 'x, y', description: '' }] })
+    .includes('Pendants,A B,"x, y",'));
 });
 
 let failures = 0;

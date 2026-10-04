@@ -5,6 +5,13 @@ import {
   DEFAULT_EMAIL_TO,
   DEFAULT_MAX_MEDIA_PER_PRODUCT,
   DEFAULT_MAX_SYNCED_IMAGES,
+  DEFAULT_MISSING_IMAGE_MONTHS,
+  DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE,
+  DEFAULT_NEW_ARRIVAL_MONTHS,
+  DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
+  DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY,
+  DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
+  DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
   DEFAULT_PENDING_WARN_THRESHOLD,
   DEFAULT_RECONCILE_LOOKBACK_MINUTES,
   DEFAULT_SUBURB_LOOKBACK_MINUTES,
@@ -110,6 +117,34 @@ export function loadConfig(options = {}) {
     /** Where the notes snapshot lives; the Function App's own storage unless set. */
     notesStorageConnection:
       process.env.NOTES_STORAGE_CONNECTION || process.env.AzureWebJobsStorage || '',
+    /**
+     * Off by default so a deploy never starts tagging products by itself. When
+     * on, the daily timer keeps the `new-arrival` tag and the New Arrivals
+     * order in step with Unleashed creation dates. The CLI's `--apply` ignores it.
+     */
+    syncNewArrivals: readBool(process.env.SYNC_NEW_ARRIVALS, false),
+    newArrivalMonths: readInt(process.env.NEW_ARRIVAL_MONTHS, DEFAULT_NEW_ARRIVAL_MONTHS),
+    newArrivalCollectionHandle:
+      process.env.NEW_ARRIVAL_COLLECTION_HANDLE || DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE,
+    /**
+     * Off by default so a deploy never starts re-tagging products by itself.
+     * When on, the Monday timer picks This Week Specials, moves the
+     * `weekly-special` tag and emails the office. The CLI's `--apply` ignores it.
+     */
+    syncWeeklySpecials: readBool(process.env.SYNC_WEEKLY_SPECIALS, false),
+    weeklySpecialsPerCategory: readInt(
+      process.env.WEEKLY_SPECIALS_PER_CATEGORY,
+      DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY,
+    ),
+    weeklySpecialsUnsoldMonths: readInt(
+      process.env.WEEKLY_SPECIALS_UNSOLD_MONTHS,
+      DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
+    ),
+    weeklySpecialsWarehouse: process.env.WEEKLY_SPECIALS_WAREHOUSE || DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
+    weeklySpecialsCollectionHandle:
+      process.env.WEEKLY_SPECIALS_COLLECTION_HANDLE || DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
+    /** How far back the weekly "products without images" email looks, by Unleashed creation date. */
+    missingImageMonths: readInt(process.env.MISSING_IMAGE_MONTHS, DEFAULT_MISSING_IMAGE_MONTHS),
     dryRun: readBool(process.env.DRY_RUN, false),
   };
 

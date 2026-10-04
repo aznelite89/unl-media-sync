@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 
 import {
+  AUDIT_MAX_PAGES,
+  AUDIT_PAGE_SIZE,
   CLIENT_TYPE,
   CUSTOMER_MAX_PAGES,
   CUSTOMER_PAGE_SIZE,
@@ -371,6 +373,49 @@ export function createUnleashedClient(config, log = console) {
     return orders;
   }
 
+  /**
+   * Every row of a paged list endpoint. Throws rather than returning a short
+   * list: callers rank and exclude on these rows, and a missing page would
+   * quietly mis-pick.
+   *
+   * @param {string} resource e.g. `StockOnHand`
+   * @param {Record<string, string | number | undefined>} [params]
+   */
+  async function listAll(resource, params = {}) {
+    const items = [];
+    let totalPages = 1;
+    for (let pageNumber = UNLEASHED_FIRST_PAGE; pageNumber <= totalPages; pageNumber += 1) {
+      if (pageNumber > AUDIT_MAX_PAGES) {
+        throw new Error(`Unleashed ${resource} has ${totalPages} pages, more than the ${AUDIT_MAX_PAGES} read`);
+      }
+      const page = await get(`/${resource}/${pageNumber}`, { ...params, pageSize: AUDIT_PAGE_SIZE });
+      totalPages = Number(page?.Pagination?.NumberOfPages ?? 1) || 1;
+      items.push(...(page?.Items ?? []));
+    }
+    return items;
+  }
+
+  /**
+   * Stock on hand, one row per product. With `warehouseCode`, that warehouse's
+   * quantities; without, all warehouses together. `DaysSinceLastSale` is null
+   * for a product never sold since the March 2024 setup.
+   *
+   * @param {{ warehouseCode?: string }} [options]
+   */
+  async function listStockOnHand({ warehouseCode } = {}) {
+    return listAll('StockOnHand', { warehouseCode });
+  }
+
+  /** Every purchase order, with its lines. */
+  async function listPurchaseOrders() {
+    return listAll('PurchaseOrders');
+  }
+
+  /** Every product that is not obsolete. */
+  async function listProducts() {
+    return listAll('Products', { includeObsolete: 'false' });
+  }
+
   return {
     get,
     post,
@@ -383,6 +428,9 @@ export function createUnleashedClient(config, log = console) {
     iterateProducts,
     countProductsModifiedSince,
     createWebhookSubscription,
+    listStockOnHand,
+    listPurchaseOrders,
+    listProducts,
   };
 }
 

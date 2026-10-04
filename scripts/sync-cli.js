@@ -36,18 +36,25 @@ const { createShopifyClient } = await import('../src/utils/shopify.js');
 const { reconcile, syncByProductCode, lookbackSince } = await import('../src/utils/reconcile.js');
 const { auditCatalogue } = await import('../src/utils/audit.js');
 const { auditDuplicates } = await import('../src/utils/duplicates.js');
-const { buildAuditCsv, buildAuditSummary, buildDuplicateCsv, buildDuplicateSummary } = await import(
-  '../src/utils/report.js'
-);
+const { auditMissingImages } = await import('../src/utils/missingImages.js');
+const {
+  buildAuditCsv,
+  buildAuditSummary,
+  buildDuplicateCsv,
+  buildDuplicateSummary,
+  buildMissingImagesCsv,
+  buildMissingImagesSummary,
+} = await import('../src/utils/report.js');
 
 function parseArgs(argv) {
-  const args = { dryRun: false, all: false, audit: false, duplicates: false, apply: false };
+  const args = { dryRun: false, all: false, audit: false, duplicates: false, missingImages: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--all') args.all = true;
     else if (arg === '--audit') args.audit = true;
     else if (arg === '--duplicates') args.duplicates = true;
+    else if (arg === '--missing-images') args.missingImages = true;
     else if (arg === '--apply') args.apply = true;
     else if (arg === '--csv') args.csv = argv[++i];
     else if (arg === '--sku') args.sku = argv[++i];
@@ -66,7 +73,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 
-if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.duplicates)) {
+if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.duplicates && !args.missingImages)) {
   console.log(
     [
       'Usage:',
@@ -79,6 +86,9 @@ if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.
       '',
       'Weekly audit, read-only — products whose images can never reach the site:',
       '  node scripts/sync-cli.js --audit [--csv reports/unmatched.csv]',
+      '',
+      'Products without images, read-only — created in the last MISSING_IMAGE_MONTHS months:',
+      '  node scripts/sync-cli.js --missing-images [--csv reports/no-images.csv]',
       '',
       'Duplicate media scan — the same picture twice on one product.',
       'Read-only unless --apply is given, and even then it only ever detaches a',
@@ -117,6 +127,10 @@ if (args.audit) {
   const audit = await auditCatalogue({ unleashed, shopify, log });
   console.log(`\n${buildAuditSummary({ audit }).text}\n`);
   if (args.csv) writeCsv(args.csv, buildAuditCsv(audit), `${audit.unmatched.length} row(s)`);
+} else if (args.missingImages) {
+  const audit = await auditMissingImages({ unleashed, shopify, config });
+  console.log(`\n${buildMissingImagesSummary({ audit }).text}\n`);
+  if (args.csv) writeCsv(args.csv, buildMissingImagesCsv(audit), `${audit.missing.length} row(s)`);
 } else if (args.duplicates) {
   // --apply is deliberately the only way to change anything here: detaching
   // media is the one destructive thing this tool can do.

@@ -365,7 +365,70 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `dailyReport` | timer, 22:00 UTC (08:00 AEST) | verifies the last day's changes every day, and the last 7 days on Monday. Emails a warning or alert the day it happens; a healthy `[OK]` summary is emailed on Monday only |
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 | `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
+| `weeklyMissingImages` | timer, Sun 23:30 UTC (Mon 09:30 AEST) | emails the office the products created in Unleashed in the last 12 months that have no image ([Products without images](#products-without-images)) |
 | `customerUpkeep` | timer, every 15 min | undoes what the Shopify connector does to Unleashed customers on a website order: puts back wiped Notes ([Customer notes guard](#customer-notes-guard), `GUARD_CUSTOMER_NOTES`), then copies City into an empty Suburb ([Customer suburb fill](#customer-suburb-fill), `FILL_CUSTOMER_SUBURB`). Each part is a no-op until its setting is `true` |
+| `newArrivals` | timer, 18:15 UTC (04:15 AEST) | keeps the New Arrivals collection to products created in Unleashed in the last six months ([New Arrivals](#new-arrivals), `SYNC_NEW_ARRIVALS`). No-op until the setting is `true` |
+| `weeklySpecials` | timer, Sun 18:30 UTC (Mon 04:30 AEST) | picks This Week Specials, 12 per category, and emails the office ([This Week Specials](#this-week-specials), `SYNC_WEEKLY_SPECIALS`). No-op until the setting is `true` |
+
+### New Arrivals
+
+The `new-arrivals` collection is products **created in Unleashed in the last six months that are
+in stock** (Christina, 2026-10-02). It replaced a hand-picked collection, which is kept as a backup at
+`/collections/new-arrivals-hand-picked-old`.
+
+Shopify cannot tell a product's age: every product was re-created there by the 31 Aug 2026 reload,
+so Shopify's created date is the reload date for all of them. The Unleashed `CreatedOn` is the real
+one. Products from the original March 2024 Unleashed import all carry 1 Mar 2024.
+
+- **The tag.** The timer reads every Unleashed product modified since the cutoff (a product is never
+  modified before it was created, so none is missed), keeps the non-obsolete ones created since,
+  matches them to Shopify by variant SKU and keeps the `new-arrival` tag on exactly those products.
+  A product with several variants dates from its newest code.
+- **In stock.** The collection itself is smart: tag `new-arrival` AND inventory greater than 0. Stock
+  moves products in and out on its own, every time the Unleashed stock export runs.
+- **Order.** The collection is sorted manually and the timer puts it newest first. A product that
+  comes back into stock between runs sits at the end until the next run. If someone switches the
+  sort in Shopify admin, the timer leaves the order alone.
+- **Drafts** are tagged too (the services such as CAD, Air Freight), but drafts never show on the
+  website.
+- **Guards.** A walk that stops short of the last Unleashed page throws, and a run that would untag
+  more than half of the tagged products (and at least 10) holds the removals back and logs it. Both
+  protect against a short read emptying the collection.
+
+```bash
+node scripts/new-arrivals-cli.js                # report only
+node scripts/new-arrivals-cli.js --apply        # tag, untag, order
+node scripts/new-arrivals-cli.js --apply --force  # also make removals the guard held back
+```
+
+### This Week Specials
+
+The `sale` collection, titled **This Week Specials**, is 48 pieces a week: 12 each of chains &
+bracelets, earrings, rings and pendants (requirement and answers from the office, 2026-10-05).
+
+- **Qualifies:** on the website, in stock in warehouse `WH` ("1. Warehouse"), no sale of any of its
+  codes in the last 18 months (Unleashed `DaysSinceLastSale`, all warehouses), and in Unleashed for
+  longer than that. The category comes from the Shopify product type, the same words the four
+  category collections use.
+- **Order:** most recently landed first. "Landed" is the latest purchase order receipt in Unleashed.
+  One size of a design is picked: one length of a chain, one size of a ring, one letter of a letter
+  pendant.
+- **No landed date:** stock from the March 2024 Unleashed setup has no purchase order, so it cannot be
+  ranked. It is left out and listed for the office in the Monday email
+  (`specials-without-landed-date.csv`); this week's picks ride along as `this-week-specials.csv`.
+  The email goes to `EMAIL_TO`.
+- **The tag and the collection.** The timer moves the `weekly-special` tag onto the picks and off last
+  week's. The collection is smart: tag `weekly-special` AND inventory greater than 0, sorted
+  manually, so a piece that sells mid-week drops off and the timer sets the landed-date order.
+- **Featured only:** prices are not changed.
+- **Guard:** if nothing qualifies at all, that is taken as a failed read and last week's specials stay.
+
+```bash
+node scripts/weekly-specials-cli.js                  # report only
+node scripts/weekly-specials-cli.js --csv            # also write both CSVs to reports/
+node scripts/weekly-specials-cli.js --apply          # tag, untag, order
+node scripts/weekly-specials-cli.js --apply --email  # and send the office email
+```
 
 ### Customer suburb fill
 
@@ -516,6 +579,26 @@ makes progress visible without opening anything.
 
 Run it on demand with `node scripts/sync-cli.js --audit --csv reports/x.csv`.
 
+### Products without images
+
+Every Monday the office is emailed the products that still need a photo: those **created in
+Unleashed in the last 12 months** (`MISSING_IMAGE_MONTHS`) that hold no image. Obsolete products
+are left out. Age is the Unleashed creation date, because the 31 Aug 2026 reload gave every Shopify
+product the same one.
+
+Each product is marked with where it stands on the website, and the list is in this order, newest
+first within each:
+
+- **on website, no image** — a shopper sees a blank product now
+- **on website, image added in Shopify only** — the page has a picture; only Unleashed lacks one
+- **not on website** — no Shopify variant carries the product code
+
+The first 40 are in the email body and the full list is attached as `products-without-images.csv`.
+The fix is to upload the photo to the product in Unleashed; the sync puts it on the website. Like
+the catalogue audit it **warns** every week until the count is zero, and it only reads.
+
+Run it on demand with `node scripts/sync-cli.js --missing-images --csv reports/no-images.csv`.
+
 ### Email delivery
 
 Reports go out through **Resend**, the same sender `searay-email-func` already
@@ -565,10 +648,19 @@ Deliveries older than 5 minutes are rejected.
 | `EMAIL_TO` | `info@`, `christina.l@`, `thongz0819@live.com` | comma-separated; changing recipients needs no redeploy |
 | `DAILY_LOOKBACK_HOURS` | `24` | daily verification window |
 | `WEEKLY_LOOKBACK_HOURS` | `168` | Monday's verification window — the week the one healthy email covers |
+| `MISSING_IMAGE_MONTHS` | `12` | how far back, by Unleashed creation date, the weekly products-without-images email looks |
 | `PENDING_WARN_THRESHOLD` | `5` | pending products tolerated before the daily report warns |
 | `ZERO_ACTIVITY_PROBE_DAYS` | `7` | how far back a silent day is checked before it counts as a fault |
 | `FILL_CUSTOMER_SUBURB` | `false` | let the 15-minute timer write Suburb on customer addresses. Off so a deploy never starts editing customer records by itself; the CLI's `--apply` ignores it |
 | `SUBURB_LOOKBACK_MINUTES` | `60` | customer modification window the suburb timer re-reads |
+| `SYNC_NEW_ARRIVALS` | `false` | let the daily timer keep the `new-arrival` tag and the New Arrivals order. Off so a deploy never starts tagging products by itself; the CLI's `--apply` ignores it |
+| `NEW_ARRIVAL_MONTHS` | `6` | how recently a product must have been created in Unleashed |
+| `NEW_ARRIVAL_COLLECTION_HANDLE` | `new-arrivals` | the collection the timer orders |
+| `SYNC_WEEKLY_SPECIALS` | `false` | let the Monday timer pick This Week Specials, move the `weekly-special` tag and email the office. Off so a deploy never starts tagging products by itself; the CLI's `--apply` ignores it |
+| `WEEKLY_SPECIALS_PER_CATEGORY` | `12` | picks in each of the four categories |
+| `WEEKLY_SPECIALS_UNSOLD_MONTHS` | `18` | how long a product must have gone without a sale |
+| `WEEKLY_SPECIALS_WAREHOUSE` | `WH` | the warehouse the stock must be in |
+| `WEEKLY_SPECIALS_COLLECTION_HANDLE` | `sale` | the collection the timer orders |
 
 ## Suggested rollout
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-10-05
+
+### Added
+- `weeklySpecials` timer, Monday 04:30 AEST: picks This Week Specials (12 each of chains & bracelets, earrings, rings, pendants; in stock in `WH`, unsold 18 months, most recently landed first), moves the `weekly-special` tag, orders the `sale` collection and emails the office the picks and the qualifying stock with no landed date (`SYNC_WEEKLY_SPECIALS`, default `false`).
+- `WEEKLY_SPECIALS_PER_CATEGORY` (default `12`), `WEEKLY_SPECIALS_UNSOLD_MONTHS` (default `18`), `WEEKLY_SPECIALS_WAREHOUSE` (default `WH`) and `WEEKLY_SPECIALS_COLLECTION_HANDLE` (default `sale`) settings.
+- `scripts/weekly-specials-cli.js`: report only, `--apply`, `--force`, `--email`, `--csv`.
+- Unleashed client: `listStockOnHand`, `listPurchaseOrders`, `listProducts`.
+- Shopify client: `listAllVariantSkus` entries carry `productType` and `onWebsite`.
+- Self-tests for This Week Specials.
+- `weeklyMissingImages` timer, Monday 09:30 AEST: emails products created in Unleashed in the last 12 months that have no image, with `products-without-images.csv` attached.
+- `MISSING_IMAGE_MONTHS` setting (default `12`).
+- `scripts/sync-cli.js --missing-images [--csv]`.
+- Shopify client: `listAllVariantSkus` entries carry `hasImage`.
+- Self-tests for the products-without-images report.
+
+### Changed
+- New Arrivals tag and collection-order helpers shared with This Week Specials (`applyTagChanges`, `orderCollection`, `newestFirst` take the date to order by).
+
+## 2026-10-02
+
+### Added
+- `newArrivals` timer, daily 04:15 AEST: tags products created in Unleashed in the last 6 months `new-arrival`, untags aged-out ones, orders the `new-arrivals` collection newest first (`SYNC_NEW_ARRIVALS`, default `false`).
+- `NEW_ARRIVAL_MONTHS` (default `6`) and `NEW_ARRIVAL_COLLECTION_HANDLE` (default `new-arrivals`) settings.
+- `scripts/new-arrivals-cli.js`: report only, `--apply`, `--force`.
+- Shopify client: `listProductIdsWithTag`, `addTags`, `removeTags`, `getCollectionProducts`, `reorderCollection`.
+- Self-tests for New Arrivals.
+
 ## 2026-09-29
 
 ### Added

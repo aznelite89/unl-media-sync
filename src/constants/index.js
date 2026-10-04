@@ -554,3 +554,151 @@ export const ADDRESS_UPDATE_FIELDS = [
 /** Docs: Salesperson needs Guid (Email/FullName optional); DefaultWarehouse needs Guid or WarehouseCode. */
 export const SALESPERSON_UPDATE_FIELDS = ['Guid', 'Email', 'FullName'];
 export const WAREHOUSE_UPDATE_FIELDS = ['Guid', 'WarehouseCode'];
+
+/**
+ * New Arrivals (Christina, 2026-10-02): products created in Unleashed in the
+ * last six months that are in stock, kept up to date without anyone picking
+ * them by hand.
+ *
+ * Shopify cannot tell the age: every product was re-created there by the
+ * 31 Aug 2026 reload, so its createdAt is the reload date. The Unleashed
+ * CreatedOn is the real one. A timer tags the products whose Unleashed code is
+ * young enough, and the `new-arrivals` smart collection is TAG + "inventory
+ * stock greater than 0", so stock moves products in and out on its own.
+ */
+export const NEW_ARRIVAL_TAG = 'new-arrival';
+export const DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE = 'new-arrivals';
+export const DEFAULT_NEW_ARRIVAL_MONTHS = 6;
+
+export const NEW_ARRIVAL_OUTCOME = {
+  TAGGED: 'tagged',
+  UNTAGGED: 'untagged',
+  DRY_RUN: 'dry_run',
+  FAILED: 'failed',
+};
+
+/**
+ * A run that would take the tag off more than this share of the products that
+ * carry it is not ageing out, it is a short Unleashed read. Removals are held
+ * back and logged; the next run decides again. `--force` on the CLI overrides.
+ */
+export const NEW_ARRIVAL_MAX_REMOVAL_SHARE = 0.5;
+/** Below this many removals the share check is skipped: a small list ages out in big fractions. */
+export const NEW_ARRIVAL_REMOVAL_GUARD_MIN = 10;
+
+/** Shopify's ceiling on `collectionReorderProducts` moves per call. */
+export const COLLECTION_REORDER_MAX_MOVES = 250;
+/** Products read from the collection when ordering it; far above its expected size. */
+export const NEW_ARRIVAL_COLLECTION_MAX_PRODUCTS = 1000;
+/** The collection sort the ordering needs; any other sort is left alone. */
+export const COLLECTION_SORT_MANUAL = 'MANUAL';
+
+/** Seconds Shopify takes to move freshly tagged products into a smart collection. */
+export const SMART_COLLECTION_SETTLE_MS = 15_000;
+
+/**
+ * Weekly "products without images" list (2026-10-05): the office needs telling
+ * which products still want a photo uploaded in Unleashed. Limited to products
+ * created in the last 12 months, because most of the older catalogue has no
+ * photographs and never will, and listing it would bury the ones worth doing.
+ */
+export const DEFAULT_MISSING_IMAGE_MONTHS = 12;
+
+/** Products listed inline in that email; the rest ride in the CSV. */
+export const MISSING_IMAGES_INLINE_LIMIT = 40;
+
+/** Where a product without an Unleashed image stands on the website. Order is the list's sort order. */
+export const WEBSITE_IMAGE_STATUS = {
+  /** Live on the website with no picture at all: what a shopper sees. */
+  LISTED_NO_IMAGE: 'listed_no_image',
+  /** On the website with a picture someone added in Shopify; only Unleashed lacks one. */
+  LISTED_HAS_IMAGE: 'listed_has_image',
+  /** No Shopify variant carries the product code. */
+  NOT_LISTED: 'not_listed',
+};
+
+export const WEBSITE_IMAGE_STATUS_ORDER = [
+  WEBSITE_IMAGE_STATUS.LISTED_NO_IMAGE,
+  WEBSITE_IMAGE_STATUS.LISTED_HAS_IMAGE,
+  WEBSITE_IMAGE_STATUS.NOT_LISTED,
+];
+
+export const WEBSITE_IMAGE_STATUS_LABEL = {
+  [WEBSITE_IMAGE_STATUS.LISTED_NO_IMAGE]: 'on website, no image',
+  [WEBSITE_IMAGE_STATUS.LISTED_HAS_IMAGE]: 'on website, image added in Shopify only',
+  [WEBSITE_IMAGE_STATUS.NOT_LISTED]: 'not on website',
+};
+
+/**
+ * This Week Specials (2026-10-05): 48 pieces a week, 12 from each of four
+ * categories, picked from stock in the main warehouse that has not sold in 18
+ * months, most recently landed first.
+ *
+ * "Landed" is the latest purchase order receipt. Stock loaded at the March 2024
+ * Unleashed setup has none, so it cannot be ranked; it is left out and emailed
+ * to the office instead. The `sale` collection, titled
+ * "This Week Specials", is TAG + "inventory stock greater than 0", sorted
+ * manually; the weekly timer moves the tag and sets the order.
+ */
+export const WEEKLY_SPECIAL_TAG = 'weekly-special';
+export const DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE = 'sale';
+export const DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY = 12;
+export const DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS = 18;
+/** "1. Warehouse", the stock the office can pick from. */
+export const DEFAULT_WEEKLY_SPECIALS_WAREHOUSE = 'WH';
+
+/** Same shape as the New Arrivals outcomes; both jobs move one tag. */
+export const WEEKLY_SPECIAL_OUTCOME = NEW_ARRIVAL_OUTCOME;
+
+export const MS_PER_DAY = MS_PER_HOUR * HOURS_PER_DAY;
+
+export const SPECIAL_CATEGORY = {
+  CHAINS_BRACELETS: 'chains_bracelets',
+  EARRINGS: 'earrings',
+  RINGS: 'rings',
+  PENDANTS: 'pendants',
+};
+
+export const SPECIAL_CATEGORY_ORDER = [
+  SPECIAL_CATEGORY.CHAINS_BRACELETS,
+  SPECIAL_CATEGORY.EARRINGS,
+  SPECIAL_CATEGORY.RINGS,
+  SPECIAL_CATEGORY.PENDANTS,
+];
+
+export const SPECIAL_CATEGORY_LABEL = {
+  [SPECIAL_CATEGORY.CHAINS_BRACELETS]: 'Chains & bracelets',
+  [SPECIAL_CATEGORY.EARRINGS]: 'Earrings',
+  [SPECIAL_CATEGORY.RINGS]: 'Rings',
+  [SPECIAL_CATEGORY.PENDANTS]: 'Pendants',
+};
+
+/**
+ * Words in the Shopify product type that put a product in each category,
+ * matching the Earrings, Chains & Bracelets, Rings and Pendants collections.
+ * Checked in this order: earrings first, because "Earrings" contains "ring".
+ */
+export const SPECIAL_CATEGORY_TYPE_WORDS = [
+  [SPECIAL_CATEGORY.EARRINGS, ['stud', 'hoop', 'huggie', 'earring']],
+  [SPECIAL_CATEGORY.CHAINS_BRACELETS, ['chain', 'bracelet', 'necklet', 'bangle']],
+  [SPECIAL_CATEGORY.RINGS, ['ring']],
+  [SPECIAL_CATEGORY.PENDANTS, ['pendant', 'locket']],
+];
+
+/**
+ * Size endings on a code: a chain's length ("9KBELY05950CM" is the 50cm
+ * 9KBELY059) and a ring size ("9KSR034SIZEP"). Lengths and sizes of one design
+ * look the same on the website, so only one of each design is picked.
+ */
+export const DESIGN_SIZE_SUFFIXES = [/\d{2}cm$/i, /size[a-z]{1,2}$/i];
+
+/**
+ * Letter pendants differ only by the letter on the end of the code ("9KDLW3C",
+ * "9KDLW3R"), so one letter of each design is picked. Matched on the Shopify
+ * product type.
+ */
+export const LETTER_PENDANT_TYPE_WORD = 'letter';
+export const LETTER_SUFFIX = /[a-z]$/i;
+
+/** Rows of specials-eligible stock with no landed date listed in the email; the rest ride in the CSV. */
+export const WEEKLY_SPECIALS_INLINE_LIMIT = 40;

@@ -1,4 +1,5 @@
 import {
+  COLLECTION_REORDER_MAX_MOVES,
   DUPLICATE_SCAN_MAX_PAGES,
   DUPLICATE_SCAN_MEDIA_SIZE,
   DUPLICATE_SCAN_PAGE_SIZE,
@@ -42,6 +43,11 @@ const ALL_VARIANT_SKUS = /* GraphQL */ `
         product {
           id
           title
+          productType
+          onlineStoreUrl
+          featuredMedia {
+            id
+          }
         }
       }
       pageInfo {
@@ -211,6 +217,83 @@ const SET_METAFIELD = /* GraphQL */ `
   }
 `;
 
+const PRODUCTS_WITH_TAG = /* GraphQL */ `
+  query ProductsWithTag($q: String!, $first: Int!, $after: String) {
+    products(first: $first, after: $after, query: $q) {
+      nodes {
+        id
+        tags
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+const ADD_TAGS = /* GraphQL */ `
+  mutation AddTags($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const REMOVE_TAGS = /* GraphQL */ `
+  mutation RemoveTags($id: ID!, $tags: [String!]!) {
+    tagsRemove(id: $id, tags: $tags) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const COLLECTION_PRODUCTS = /* GraphQL */ `
+  query CollectionProducts($handle: String!, $first: Int!, $after: String) {
+    collectionByIdentifier(identifier: { handle: $handle }) {
+      id
+      sortOrder
+      ruleSet {
+        rules {
+          column
+          relation
+          condition
+        }
+      }
+      products(first: $first, after: $after, sortKey: COLLECTION_DEFAULT) {
+        nodes {
+          id
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+`;
+
+const REORDER_COLLECTION = /* GraphQL */ `
+  mutation ReorderCollection($id: ID!, $moves: [MoveInput!]!) {
+    collectionReorderProducts(id: $id, moves: $moves) {
+      job {
+        id
+        done
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 /**
  * @param {{ shopify: { storeDomain: string, adminToken: string } }} config
  * @param {{ info?: Function, warn?: Function, error?: Function }} [log]
@@ -312,7 +395,7 @@ export function createShopifyClient(config, log = console) {
    * Every non-empty variant SKU in the store, lowercased, mapped to its product.
    *
    * @param {{ pageSize?: number, maxPages?: number }} [options]
-   * @returns {Promise<Map<string, { productId: string, title: string }>>}
+   * @returns {Promise<Map<string, { productId: string, title: string, productCount: number, hasImage: boolean, productType: string, onWebsite: boolean }>>}
    */
   async function listAllVariantSkus({
     pageSize = SHOPIFY_BULK_PAGE_SIZE,
@@ -337,7 +420,15 @@ export function createShopifyClient(config, log = console) {
         const productId = node.product?.id ?? null;
         const existing = skus.get(sku);
         if (!existing) {
-          skus.set(sku, { productId, title: node.product?.title ?? '', productCount: 1 });
+          skus.set(sku, {
+            productId,
+            title: node.product?.title ?? '',
+            productCount: 1,
+            hasImage: Boolean(node.product?.featuredMedia),
+            productType: node.product?.productType ?? '',
+            // Active and published to the Online Store: a shopper can see it.
+            onWebsite: Boolean(node.product?.onlineStoreUrl),
+          });
         } else if (existing.productId !== productId) {
           // One SKU on two different products is a data fault the sync reports
           // as `ambiguous` and refuses to act on, so the audit surfaces it.
@@ -514,6 +605,96 @@ export function createShopifyClient(config, log = console) {
     return data?.metafieldsSet?.metafields ?? [];
   }
 
+  /**
+   * Ids of every product carrying `tag`. Shopify's tag search is exact on the
+   * whole tag but case-insensitive, so the tag list is re-checked here.
+   *
+   * @param {string} tag
+   * @returns {Promise<Set<string>>}
+   */
+  async function listProductIdsWithTag(tag) {
+    const ids = new Set();
+    const wanted = tag.toLowerCase();
+    let after = null;
+    for (let pages = 0; pages < SHOPIFY_BULK_MAX_PAGES; pages += 1) {
+      const data = await graphql(
+        PRODUCTS_WITH_TAG,
+        { q: `tag:"${tag}"`, first: SHOPIFY_BULK_PAGE_SIZE, after },
+        { label: 'listProductIdsWithTag' },
+      );
+      const connection = data?.products;
+      for (const node of connection?.nodes ?? []) {
+        if ((node.tags ?? []).some((t) => String(t).toLowerCase() === wanted)) ids.add(node.id);
+      }
+      if (!connection?.pageInfo?.hasNextPage) return ids;
+      after = connection.pageInfo.endCursor;
+    }
+    throw new Error(`listProductIdsWithTag: more than ${SHOPIFY_BULK_MAX_PAGES} pages of "${tag}"`);
+  }
+
+  /** @param {{ productId: string, tags: string[] }} input */
+  async function addTags({ productId, tags }) {
+    const data = await graphql(ADD_TAGS, { id: productId, tags }, { label: 'addTags' });
+    assertNoUserErrors('tagsAdd', data?.tagsAdd?.userErrors);
+  }
+
+  /** @param {{ productId: string, tags: string[] }} input */
+  async function removeTags({ productId, tags }) {
+    const data = await graphql(REMOVE_TAGS, { id: productId, tags }, { label: 'removeTags' });
+    assertNoUserErrors('tagsRemove', data?.tagsRemove?.userErrors);
+  }
+
+  /**
+   * A collection's id, sort order, rules and product ids in their current order.
+   *
+   * @param {string} handle
+   * @param {{ maxProducts: number }} options
+   * @returns {Promise<{ id: string, sortOrder: string, rules: object[], productIds: string[] } | null>}
+   */
+  async function getCollectionProducts(handle, { maxProducts }) {
+    const productIds = [];
+    let after = null;
+    let collection = null;
+    while (productIds.length < maxProducts) {
+      const data = await graphql(
+        COLLECTION_PRODUCTS,
+        { handle, first: SHOPIFY_BULK_PAGE_SIZE, after },
+        { label: 'getCollectionProducts' },
+      );
+      collection = data?.collectionByIdentifier;
+      if (!collection) return null;
+      productIds.push(...(collection.products?.nodes ?? []).map((node) => node.id));
+      if (!collection.products?.pageInfo?.hasNextPage) break;
+      after = collection.products.pageInfo.endCursor;
+    }
+    return {
+      id: collection.id,
+      sortOrder: collection.sortOrder,
+      rules: collection.ruleSet?.rules ?? [],
+      productIds,
+    };
+  }
+
+  /**
+   * Applies `collectionReorderProducts` moves, at most Shopify's per-call
+   * ceiling at a time. The jobs run asynchronously on Shopify's side.
+   *
+   * @param {{ collectionId: string, moves: Array<{ id: string, newPosition: string }> }} input
+   */
+  async function reorderCollection({ collectionId, moves }) {
+    const jobs = [];
+    for (let start = 0; start < moves.length; start += COLLECTION_REORDER_MAX_MOVES) {
+      const data = await graphql(
+        REORDER_COLLECTION,
+        { id: collectionId, moves: moves.slice(start, start + COLLECTION_REORDER_MAX_MOVES) },
+        { label: 'reorderCollection' },
+      );
+      assertNoUserErrors('collectionReorderProducts', data?.collectionReorderProducts?.userErrors);
+      jobs.push(data?.collectionReorderProducts?.job ?? null);
+    }
+    return jobs;
+  }
+
   return {
     graphql,
     findProductsBySku,
@@ -524,5 +705,10 @@ export function createShopifyClient(config, log = console) {
     detachMedia,
     reorderMedia,
     saveState,
+    listProductIdsWithTag,
+    addTags,
+    removeTags,
+    getCollectionProducts,
+    reorderCollection,
   };
 }

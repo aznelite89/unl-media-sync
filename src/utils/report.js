@@ -5,10 +5,15 @@ import {
   DUPLICATE_KIND,
   EMAIL_SUBJECT_TAG,
   HOURS_PER_DAY,
+  MISSING_IMAGES_INLINE_LIMIT,
   OUTCOME_LABEL,
   REPORT_NOTE_MAX_CHARS,
+  SPECIAL_CATEGORY_LABEL,
   SYNC_HEALTH,
   SYNC_OUTCOME,
+  WEBSITE_IMAGE_STATUS,
+  WEBSITE_IMAGE_STATUS_LABEL,
+  WEEKLY_SPECIALS_INLINE_LIMIT,
 } from '../constants/index.js';
 import { csvCell, escapeHtml } from './email.js';
 
@@ -572,6 +577,244 @@ export function buildDuplicateSummary({ audit, applied = false }) {
     text: buildText({ title, rows, reasons, problems, problemHeading: 'Affected products' }),
     html: buildHtml({ title, health, rows, reasons, problems, problemHeading: 'Affected products' }),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Weekly products without images                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Turns the missing-image list into the weekly email to the office.
+ *
+ * A worklist like the catalogue audit: it warns every week until every product
+ * created in the window has a photo, and carries the count in the subject.
+ *
+ * @param {{ audit: object }} input Result of `auditMissingImages`.
+ */
+export function buildMissingImagesSummary({ audit }) {
+  const missing = audit?.missing ?? [];
+  const months = audit?.months ?? 0;
+  const count = (status) => missing.filter((row) => row.status === status).length;
+  const listedNoImage = count(WEBSITE_IMAGE_STATUS.LISTED_NO_IMAGE);
+  const listedHasImage = count(WEBSITE_IMAGE_STATUS.LISTED_HAS_IMAGE);
+
+  const health = missing.length > 0 ? SYNC_HEALTH.WARN : SYNC_HEALTH.OK;
+  const headline =
+    missing.length > 0
+      ? `${missing.length} product(s) need an image uploaded`
+      : 'every recent product has an image';
+
+  const rows = [
+    [`Created, last ${months} months`, audit?.recent ?? 0],
+    ['…with an Unleashed image', audit?.withImages ?? 0],
+    ['Without an Unleashed image', missing.length],
+    ['…on website, no image', listedNoImage],
+    ['…on website, Shopify image', listedHasImage],
+    ['…not on website', count(WEBSITE_IMAGE_STATUS.NOT_LISTED)],
+  ];
+
+  const reasons = [];
+  if (missing.length > 0) {
+    reasons.push(
+      `${missing.length} product(s) created in Unleashed since ${audit?.cutoff} have no image. ` +
+        'Upload the photo to the product in Unleashed and the sync puts it on the website.',
+    );
+  }
+  if (listedNoImage > 0) {
+    reasons.push(
+      `${listedNoImage} of them are on the website now with no picture at all. ` +
+        'They are listed first.',
+    );
+  }
+  if (listedHasImage > 0) {
+    reasons.push(
+      `${listedHasImage} already show a picture on the website that was added in Shopify by hand; ` +
+        'only the Unleashed record is missing one.',
+    );
+  }
+  if ((audit?.recent ?? 0) > 0 && (audit?.withImages ?? 0) === 0) {
+    reasons.push(
+      'Not one product in the window has an image, which is more likely Unleashed returning ' +
+        'products without their images than a real count. Check before acting on this list.',
+    );
+  }
+  if (missing.length === 0) {
+    reasons.push(`Nothing to action — every product created since ${audit?.cutoff} has an image.`);
+  }
+
+  const inline = missing.slice(0, MISSING_IMAGES_INLINE_LIMIT).map((row) => ({
+    productCode: row.productCode,
+    outcome: WEBSITE_IMAGE_STATUS_LABEL[row.status],
+    // Descriptions here carry stray tabs and line breaks, which split a row in two.
+    note: truncate(`created ${row.created} — ${String(row.description).replace(/\s+/g, ' ').trim()}`),
+  }));
+  if (missing.length > inline.length) {
+    inline.push({
+      productCode: `…and ${missing.length - inline.length} more in the attached CSV`,
+      outcome: '',
+      note: '',
+    });
+  }
+
+  const title = `Products without images — created in the last ${months} months`;
+  const problemHeading = 'Products needing an image';
+
+  return {
+    health,
+    reasons,
+    counts: { recent: audit?.recent ?? 0, missing: missing.length, listedNoImage, listedHasImage },
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] Products without images — ${headline}`,
+    text: buildText({ title, rows, reasons, problems: inline, problemHeading }),
+    html: buildHtml({ title, health, rows, reasons, problems: inline, problemHeading }),
+  };
+}
+
+/**
+ * The full missing-image list as CSV, to be worked through in a spreadsheet.
+ *
+ * @param {object} audit Result of `auditMissingImages`.
+ */
+export function buildMissingImagesCsv(audit) {
+  const lines = ['product_code,description,created,website,website_title'];
+  for (const row of audit?.missing ?? []) {
+    lines.push(
+      [
+        csvCell(row.productCode),
+        csvCell(row.description),
+        csvCell(row.created),
+        csvCell(WEBSITE_IMAGE_STATUS_LABEL[row.status]),
+        csvCell(row.websiteTitle),
+      ].join(','),
+    );
+  }
+  return lines.join('\n');
+}
+
+/* -------------------------------------------------------------------------- */
+/* This Week Specials                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The weekly specials email to the office: what went on this week, any
+ * category that came up short, and the qualifying stock that could not be
+ * ranked because it has no landed date in Unleashed.
+ *
+ * @param {{ report: object }} input Result of `syncWeeklySpecials`.
+ */
+export function buildWeeklySpecialsSummary({ report }) {
+  const specials = report?.specials ?? [];
+  const undated = report?.undated ?? [];
+  const shortfalls = report?.shortfalls ?? [];
+  const failed = (report?.results ?? []).filter((row) => row.error).length;
+  const perCategory = report?.perCategory ?? 0;
+
+  let health = SYNC_HEALTH.OK;
+  if (undated.length > 0 || shortfalls.length > 0) health = SYNC_HEALTH.WARN;
+  if (failed > 0 || (report?.heldRemovals ?? []).length > 0) health = SYNC_HEALTH.ALERT;
+
+  const headline =
+    undated.length > 0
+      ? `${specials.length} on this week, ${undated.length} need a landed date`
+      : `${specials.length} on this week`;
+
+  const rows = [
+    ['Qualifying products', report?.qualifying ?? 0],
+    ['…picked this week', specials.length],
+    ['…no landed date', undated.length],
+  ];
+  for (const [category, label] of Object.entries(SPECIAL_CATEGORY_LABEL)) {
+    rows.push([`${label} picked`, `${specials.filter((row) => row.category === category).length} of ${perCategory}`]);
+  }
+
+  const reasons = [
+    `Rules: in stock in warehouse ${report?.warehouse}, not sold since ${report?.unsoldSince}, ` +
+      'most recently landed first. Products on the website only.',
+  ];
+  for (const shortfall of shortfalls) {
+    reasons.push(
+      `${SPECIAL_CATEGORY_LABEL[shortfall.category]}: only ${shortfall.picked} of ${shortfall.wanted} ` +
+        'qualifying products have a landed date.',
+    );
+  }
+  if (undated.length > 0) {
+    reasons.push(
+      `${undated.length} product(s) qualify but have no purchase order receipt in Unleashed, so they ` +
+        'cannot be ranked by landed date and were left out. Most are stock from the March 2024 Unleashed ' +
+        'setup. The full list is in the attached CSV.',
+    );
+  }
+  if (failed > 0) reasons.push(`${failed} tag change(s) on Shopify failed; the log has the errors.`);
+  if ((report?.heldRemovals ?? []).length > 0) {
+    reasons.push(
+      'Nothing qualified at all, which is more likely a failed Unleashed read than a real result, ' +
+        "so last week's specials were left in place.",
+    );
+  }
+  if (report?.dryRun) reasons.push('Dry run: nothing was changed on the website.');
+
+  const inline = undated.slice(0, WEEKLY_SPECIALS_INLINE_LIMIT).map((row) => ({
+    productCode: row.productCodes.join(' / '),
+    outcome: SPECIAL_CATEGORY_LABEL[row.category],
+    note: truncate(String(row.title || row.description).replace(/\s+/g, ' ').trim()),
+  }));
+  if (undated.length > inline.length) {
+    inline.push({
+      productCode: `…and ${undated.length - inline.length} more in the attached CSV`,
+      outcome: '',
+      note: '',
+    });
+  }
+
+  const title = 'This Week Specials';
+  const problemHeading = 'Qualifying products with no landed date';
+
+  return {
+    health,
+    reasons,
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] This Week Specials — ${headline}`,
+    text: buildText({ title, rows, reasons, problems: inline, problemHeading }),
+    html: buildHtml({ title, health, rows, reasons, problems: inline, problemHeading }),
+  };
+}
+
+/**
+ * This week's picks as CSV.
+ *
+ * @param {object} report Result of `syncWeeklySpecials`.
+ */
+export function buildWeeklySpecialsCsv(report) {
+  const lines = ['category,product_code,website_title,landed'];
+  for (const row of report?.specials ?? []) {
+    lines.push(
+      [
+        csvCell(SPECIAL_CATEGORY_LABEL[row.category]),
+        csvCell(row.code),
+        csvCell(row.title),
+        csvCell(row.landed),
+      ].join(','),
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Qualifying products with no landed date, as CSV for the office.
+ *
+ * @param {object} report Result of `syncWeeklySpecials`.
+ */
+export function buildUndatedSpecialsCsv(report) {
+  const lines = ['category,product_codes_in_stock,website_title,description'];
+  for (const row of report?.undated ?? []) {
+    lines.push(
+      [
+        csvCell(SPECIAL_CATEGORY_LABEL[row.category]),
+        csvCell(row.productCodes.join(' ')),
+        csvCell(row.title),
+        csvCell(row.description),
+      ].join(','),
+    );
+  }
+  return lines.join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
