@@ -5,6 +5,7 @@ import {
   DEFAULT_EMAIL_TO,
   DEFAULT_MAX_MEDIA_PER_PRODUCT,
   DEFAULT_MAX_SYNCED_IMAGES,
+  DEFAULT_MISSING_IMAGE_EXCLUDE_CODES,
   DEFAULT_MISSING_IMAGE_MONTHS,
   DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE,
   DEFAULT_NEW_ARRIVAL_MONTHS,
@@ -145,6 +146,11 @@ export function loadConfig(options = {}) {
       process.env.WEEKLY_SPECIALS_COLLECTION_HANDLE || DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
     /** How far back the weekly "products without images" email looks, by Unleashed creation date. */
     missingImageMonths: readInt(process.env.MISSING_IMAGE_MONTHS, DEFAULT_MISSING_IMAGE_MONTHS),
+    /** Product codes that email never lists; setting it replaces the default list. */
+    missingImageExcludeCodes: readList(
+      process.env.MISSING_IMAGE_EXCLUDE_CODES,
+      DEFAULT_MISSING_IMAGE_EXCLUDE_CODES,
+    ),
     dryRun: readBool(process.env.DRY_RUN, false),
   };
 

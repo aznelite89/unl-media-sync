@@ -2873,6 +2873,21 @@ test('only products created inside the window with no image are listed', () => {
   assert.equal(result.missing[0].created, '2026-08-01');
 });
 
+test('excluded codes are left out of the missing-image list, whatever their case', () => {
+  const result = findMissingImages({
+    products: [
+      { ProductCode: 'RETURN-ITEM', CreatedOn: naDate(2026, 9, 16), Images: [] },
+      { ProductCode: 'Air Freight', CreatedOn: naDate(2026, 8, 28), Images: [] },
+      { ProductCode: 'BARE1', CreatedOn: naDate(2026, 8, 1), Images: [] },
+    ],
+    skus: miSkus,
+    cutoffMs: MI_CUTOFF,
+    excludeCodes: ['return-item', 'AIR FREIGHT '],
+  });
+  assert.equal(result.recent, 1);
+  assert.deepEqual(result.missing.map((row) => row.productCode), ['BARE1']);
+});
+
 test('products bare on the website come first, then newest first', () => {
   const result = findMissingImages({
     products: [

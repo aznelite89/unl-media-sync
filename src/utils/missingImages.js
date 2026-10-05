@@ -14,7 +14,7 @@ import { newArrivalCutoff } from './newArrivalsPlan.js';
 
 /**
  * Pure: which products created on or after `cutoffMs` have no image, and where
- * each stands on the website. Obsolete products never count.
+ * each stands on the website. Obsolete products and `excludeCodes` never count.
  *
  * Sorted so a product live on the website with no picture comes first, then
  * newest first within each group.
@@ -23,15 +23,18 @@ import { newArrivalCutoff } from './newArrivalsPlan.js';
  *   products: object[],
  *   skus: Map<string, { title: string, hasImage: boolean }>,
  *   cutoffMs: number,
+ *   excludeCodes?: string[],
  * }} input
  */
-export function findMissingImages({ products, skus, cutoffMs }) {
+export function findMissingImages({ products, skus, cutoffMs, excludeCodes = [] }) {
+  const excluded = new Set(excludeCodes.map(normaliseCode));
   const missing = [];
   let recent = 0;
   let withImages = 0;
 
   for (const product of products) {
     if (product?.Obsolete) continue;
+    if (excluded.has(normaliseCode(product?.ProductCode))) continue;
     const createdMs = parseUnleashedDate(product?.CreatedOn);
     if (createdMs === null || createdMs < cutoffMs) continue;
     recent += 1;
@@ -86,6 +89,11 @@ export async function auditMissingImages({ unleashed, shopify, config, nowMs = D
     months,
     cutoff: new Date(cutoffMs).toISOString().slice(0, 10),
     scanned,
-    ...findMissingImages({ products, skus, cutoffMs }),
+    ...findMissingImages({
+      products,
+      skus,
+      cutoffMs,
+      excludeCodes: config.missingImageExcludeCodes,
+    }),
   };
 }

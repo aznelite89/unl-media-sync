@@ -583,7 +583,7 @@ Run it on demand with `node scripts/sync-cli.js --audit --csv reports/x.csv`.
 
 Every Monday the office is emailed the products that still need a photo: those **created in
 Unleashed in the last 12 months** (`MISSING_IMAGE_MONTHS`) that hold no image. Obsolete products
-are left out. Age is the Unleashed creation date, because the 31 Aug 2026 reload gave every Shopify
+are left out, as are the codes in `MISSING_IMAGE_EXCLUDE_CODES` (service and freight lines). Age is the Unleashed creation date, because the 31 Aug 2026 reload gave every Shopify
 product the same one.
 
 Each product is marked with where it stands on the website, and the list is in this order, newest
@@ -649,6 +649,7 @@ Deliveries older than 5 minutes are rejected.
 | `DAILY_LOOKBACK_HOURS` | `24` | daily verification window |
 | `WEEKLY_LOOKBACK_HOURS` | `168` | Monday's verification window — the week the one healthy email covers |
 | `MISSING_IMAGE_MONTHS` | `12` | how far back, by Unleashed creation date, the weekly products-without-images email looks |
+| `MISSING_IMAGE_EXCLUDE_CODES` | `RETURN-ITEM, Air Freight` | comma-separated product codes that email never lists (service and freight lines); setting it replaces the default list |
 | `PENDING_WARN_THRESHOLD` | `5` | pending products tolerated before the daily report warns |
 | `ZERO_ACTIVITY_PROBE_DAYS` | `7` | how far back a silent day is checked before it counts as a fault |
 | `FILL_CUSTOMER_SUBURB` | `false` | let the 15-minute timer write Suburb on customer addresses. Off so a deploy never starts editing customer records by itself; the CLI's `--apply` ignores it |

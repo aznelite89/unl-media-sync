@@ -604,6 +604,12 @@ export const SMART_COLLECTION_SETTLE_MS = 15_000;
  */
 export const DEFAULT_MISSING_IMAGE_MONTHS = 12;
 
+/**
+ * Unleashed codes that are not goods and will never have a photo: service and
+ * freight lines. Left out of the list. Overridable with MISSING_IMAGE_EXCLUDE_CODES.
+ */
+export const DEFAULT_MISSING_IMAGE_EXCLUDE_CODES = ['RETURN-ITEM', 'Air Freight'];
+
 /** Products listed inline in that email; the rest ride in the CSV. */
 export const MISSING_IMAGES_INLINE_LIMIT = 40;
 

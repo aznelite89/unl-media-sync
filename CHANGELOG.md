@@ -3,6 +3,7 @@
 ## 2026-10-05
 
 ### Added
+- `MISSING_IMAGE_EXCLUDE_CODES` setting (default `RETURN-ITEM, Air Freight`): product codes the products-without-images email never lists.
 - `weeklySpecials` timer, Monday 04:30 AEST: picks This Week Specials (12 each of chains & bracelets, earrings, rings, pendants; in stock in `WH`, unsold 18 months, most recently landed first), moves the `weekly-special` tag, orders the `sale` collection and emails the office the picks and the qualifying stock with no landed date (`SYNC_WEEKLY_SPECIALS`, default `false`).
 - `WEEKLY_SPECIALS_PER_CATEGORY` (default `12`), `WEEKLY_SPECIALS_UNSOLD_MONTHS` (default `18`), `WEEKLY_SPECIALS_WAREHOUSE` (default `WH`) and `WEEKLY_SPECIALS_COLLECTION_HANDLE` (default `sale`) settings.
 - `scripts/weekly-specials-cli.js`: report only, `--apply`, `--force`, `--email`, `--csv`.
