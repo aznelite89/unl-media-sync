@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-07
+
+### Added
+- `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` setting (default `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, Lotus, D.N. Jewels, DAUB A.D`).
+- Self-tests for the new This Week Specials rules.
+
+### Changed
+- This Week Specials leaves out stock from current suppliers.
+- This Week Specials leaves out a product when anything in the same `WH` bin location sold in the window (other lengths, sizes, alloys).
+- `WEEKLY_SPECIALS_UNSOLD_MONTHS` default 18 to 24.
+- This Week Specials ordered oldest landed first; stock with no purchase order counts as landed before March 2024 and goes first; ties by longest unsold, then a weekly shuffle.
+- One This Week Specials pick per bin location.
+- This Week Specials email lists the picks, with supplier, landed date and last related sale in the CSV.
+
+### Removed
+- This Week Specials "no landed date" list and `specials-without-landed-date.csv`.
+
 ## 2026-10-05
 
 ### Added

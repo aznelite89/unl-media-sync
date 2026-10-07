@@ -404,28 +404,32 @@ node scripts/new-arrivals-cli.js --apply --force  # also make removals the guard
 ### This Week Specials
 
 The `sale` collection, titled **This Week Specials**, is 48 pieces a week: 12 each of chains &
-bracelets, earrings, rings and pendants (requirement and answers from the office, 2026-10-05).
+bracelets, earrings, rings and pendants (rules from the office, 2026-10-07).
 
-- **Qualifies:** on the website, in stock in warehouse `WH` ("1. Warehouse"), no sale of any of its
-  codes in the last 18 months (Unleashed `DaysSinceLastSale`, all warehouses), and in Unleashed for
-  longer than that. The category comes from the Shopify product type, the same words the four
-  category collections use.
-- **Order:** most recently landed first. "Landed" is the latest purchase order receipt in Unleashed.
-  One size of a design is picked: one length of a chain, one size of a ring, one letter of a letter
-  pendant.
-- **No landed date:** stock from the March 2024 Unleashed setup has no purchase order, so it cannot be
-  ranked. It is left out and listed for the office in the Monday email
-  (`specials-without-landed-date.csv`); this week's picks ride along as `this-week-specials.csv`.
-  The email goes to `EMAIL_TO`.
+- **Qualifies:** on the website, in stock in warehouse `WH` ("1. Warehouse"), and in Unleashed for
+  longer than 24 months. Every one of its codes comes from a supplier not in
+  `WEEKLY_SPECIALS_CURRENT_SUPPLIERS`; "Unknown" and no supplier count as not current.
+  Nothing **related** sold in the last 24 months (Unleashed `DaysSinceLastSale`, all warehouses).
+  Related means the same bin location in `WH`, which covers other lengths, sizes and alloys of a design
+  (bin `FSY050` holds the 9k and 18k Franco chains in every length). A product with no bin is related to
+  the other lengths and sizes of its design code. The category comes from the Shopify product type, the
+  same words the four category collections use.
+- **Order:** oldest landed first. "Landed" is the latest purchase order receipt in Unleashed. Stock
+  from the March 2024 Unleashed setup has no purchase order. It landed before every receipt, so it goes
+  first and shows as "before Mar 2024". Ties go to the longest time since anything related sold. Any
+  remaining ties are shuffled once a week (weeks start Monday 00:00 AEST), so the collection changes
+  each Monday. One product per bin is picked.
+- **Email:** the picks go to `EMAIL_TO` every Monday as `this-week-specials.csv`. A category with fewer
+  than 12 qualifying products makes the email a WARN.
 - **The tag and the collection.** The timer moves the `weekly-special` tag onto the picks and off last
   week's. The collection is smart: tag `weekly-special` AND inventory greater than 0, sorted
-  manually, so a piece that sells mid-week drops off and the timer sets the landed-date order.
+  manually, so a piece that sells mid-week drops off and the timer sets the order.
 - **Featured only:** prices are not changed.
 - **Guard:** if nothing qualifies at all, that is taken as a failed read and last week's specials stay.
 
 ```bash
 node scripts/weekly-specials-cli.js                  # report only
-node scripts/weekly-specials-cli.js --csv            # also write both CSVs to reports/
+node scripts/weekly-specials-cli.js --csv            # also write the picks CSV to reports/
 node scripts/weekly-specials-cli.js --apply          # tag, untag, order
 node scripts/weekly-specials-cli.js --apply --email  # and send the office email
 ```
@@ -659,8 +663,9 @@ Deliveries older than 5 minutes are rejected.
 | `NEW_ARRIVAL_COLLECTION_HANDLE` | `new-arrivals` | the collection the timer orders |
 | `SYNC_WEEKLY_SPECIALS` | `false` | let the Monday timer pick This Week Specials, move the `weekly-special` tag and email the office. Off so a deploy never starts tagging products by itself; the CLI's `--apply` ignores it |
 | `WEEKLY_SPECIALS_PER_CATEGORY` | `12` | picks in each of the four categories |
-| `WEEKLY_SPECIALS_UNSOLD_MONTHS` | `18` | how long a product must have gone without a sale |
-| `WEEKLY_SPECIALS_WAREHOUSE` | `WH` | the warehouse the stock must be in |
+| `WEEKLY_SPECIALS_UNSOLD_MONTHS` | `24` | how long a product and everything in its bin must have gone without a sale |
+| `WEEKLY_SPECIALS_WAREHOUSE` | `WH` | the warehouse the stock must be in, and whose bin locations relate products |
+| `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` | `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, Lotus, D.N. Jewels, DAUB A.D` | Unleashed supplier names Searay still buys from; their stock is never a special. Setting it replaces the list |
 | `WEEKLY_SPECIALS_COLLECTION_HANDLE` | `sale` | the collection the timer orders |
 
 ## Suggested rollout

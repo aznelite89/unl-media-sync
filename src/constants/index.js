@@ -636,27 +636,52 @@ export const WEBSITE_IMAGE_STATUS_LABEL = {
 };
 
 /**
- * This Week Specials (2026-10-05): 48 pieces a week, 12 from each of four
- * categories, picked from stock in the main warehouse that has not sold in 18
- * months, most recently landed first.
+ * This Week Specials (rules from the office, 2026-10-07): 48 pieces a week, 12
+ * from each of four categories. A piece qualifies when it is in stock in the
+ * main warehouse, comes from a supplier Searay no longer buys from, and
+ * neither it nor any related product (same warehouse bin location) has sold in
+ * 24 months. Oldest landed first.
  *
  * "Landed" is the latest purchase order receipt. Stock loaded at the March 2024
- * Unleashed setup has none, so it cannot be ranked; it is left out and emailed
- * to the office instead. The `sale` collection, titled
- * "This Week Specials", is TAG + "inventory stock greater than 0", sorted
- * manually; the weekly timer moves the tag and sets the order.
+ * Unleashed setup has none; it landed before every receipt, so it goes first.
+ * The `sale` collection, titled "This Week Specials", is TAG + "inventory
+ * stock greater than 0", sorted manually; the weekly timer moves the tag and
+ * sets the order.
  */
 export const WEEKLY_SPECIAL_TAG = 'weekly-special';
 export const DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE = 'sale';
 export const DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY = 12;
-export const DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS = 18;
+export const DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS = 24;
 /** "1. Warehouse", the stock the office can pick from. */
 export const DEFAULT_WEEKLY_SPECIALS_WAREHOUSE = 'WH';
+
+/**
+ * Suppliers Searay still buys from, as Unleashed spells `Supplier.SupplierName`
+ * (matched without case). Stock from any other supplier, including "Unknown"
+ * and none, can be a special.
+ */
+export const DEFAULT_WEEKLY_SPECIALS_CURRENT_SUPPLIERS = [
+  'Divya',
+  'Inah Co Ltd - 9k CZ Huggies',
+  'Forval',
+  'Lotus',
+  'D.N. Jewels',
+  'DAUB A.D',
+];
+
+/** Bin location values in Unleashed that mean "no bin", so they relate nothing. */
+export const NO_BIN_LOCATIONS = ['', '0', 'n/a'];
 
 /** Same shape as the New Arrivals outcomes; both jobs move one tag. */
 export const WEEKLY_SPECIAL_OUTCOME = NEW_ARRIVAL_OUTCOME;
 
 export const MS_PER_DAY = MS_PER_HOUR * HOURS_PER_DAY;
+export const MS_PER_WEEK = 7 * MS_PER_DAY;
+/**
+ * Specials weeks start Monday 00:00 AEST (Sunday 14:00 UTC), so the Monday
+ * timer and any CLI run that week pick the same. The epoch was a Thursday.
+ */
+export const SPECIALS_WEEK_START_OFFSET_MS = 3 * MS_PER_DAY + 14 * MS_PER_HOUR;
 
 export const SPECIAL_CATEGORY = {
   CHAINS_BRACELETS: 'chains_bracelets',
@@ -693,18 +718,24 @@ export const SPECIAL_CATEGORY_TYPE_WORDS = [
 
 /**
  * Size endings on a code: a chain's length ("9KBELY05950CM" is the 50cm
- * 9KBELY059) and a ring size ("9KSR034SIZEP"). Lengths and sizes of one design
- * look the same on the website, so only one of each design is picked.
+ * 9KBELY059) and a ring size ("9KSR034SIZEP"). Products with no warehouse
+ * bin are related to the other lengths and sizes of their design instead.
  */
 export const DESIGN_SIZE_SUFFIXES = [/\d{2}cm$/i, /size[a-z]{1,2}$/i];
 
 /**
  * Letter pendants differ only by the letter on the end of the code ("9KDLW3C",
- * "9KDLW3R"), so one letter of each design is picked. Matched on the Shopify
- * product type.
+ * "9KDLW3R"). Matched on the Shopify product type.
  */
 export const LETTER_PENDANT_TYPE_WORD = 'letter';
 export const LETTER_SUFFIX = /[a-z]$/i;
 
-/** Rows of specials-eligible stock with no landed date listed in the email; the rest ride in the CSV. */
-export const WEEKLY_SPECIALS_INLINE_LIMIT = 40;
+/** Prefix that keeps a design-family key apart from a bin location. */
+export const DESIGN_FAMILY_KEY_PREFIX = 'design:';
+
+/** Shown in place of a landed date for stock that has no purchase order receipt. */
+export const LANDED_BEFORE_UNLEASHED = 'before Mar 2024';
+
+/** Shown in place of a last sale date when no product in the group has one. */
+export const NO_SALE_ON_RECORD = 'no sale on record';
+

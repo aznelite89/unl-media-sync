@@ -10,6 +10,7 @@ import {
   DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE,
   DEFAULT_NEW_ARRIVAL_MONTHS,
   DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
+  DEFAULT_WEEKLY_SPECIALS_CURRENT_SUPPLIERS,
   DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY,
   DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
   DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
@@ -142,6 +143,11 @@ export function loadConfig(options = {}) {
       DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
     ),
     weeklySpecialsWarehouse: process.env.WEEKLY_SPECIALS_WAREHOUSE || DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
+    /** Unleashed supplier names Searay still buys from; their stock is never a special. */
+    weeklySpecialsCurrentSuppliers: readList(
+      process.env.WEEKLY_SPECIALS_CURRENT_SUPPLIERS,
+      DEFAULT_WEEKLY_SPECIALS_CURRENT_SUPPLIERS,
+    ),
     weeklySpecialsCollectionHandle:
       process.env.WEEKLY_SPECIALS_COLLECTION_HANDLE || DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
     /** How far back the weekly "products without images" email looks, by Unleashed creation date. */

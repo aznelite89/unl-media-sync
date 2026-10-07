@@ -5,6 +5,7 @@ import {
   DUPLICATE_KIND,
   EMAIL_SUBJECT_TAG,
   HOURS_PER_DAY,
+  LANDED_BEFORE_UNLEASHED,
   MISSING_IMAGES_INLINE_LIMIT,
   OUTCOME_LABEL,
   REPORT_NOTE_MAX_CHARS,
@@ -13,7 +14,6 @@ import {
   SYNC_OUTCOME,
   WEBSITE_IMAGE_STATUS,
   WEBSITE_IMAGE_STATUS_LABEL,
-  WEEKLY_SPECIALS_INLINE_LIMIT,
 } from '../constants/index.js';
 import { csvCell, escapeHtml } from './email.js';
 
@@ -695,52 +695,40 @@ export function buildMissingImagesCsv(audit) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The weekly specials email to the office: what went on this week, any
- * category that came up short, and the qualifying stock that could not be
- * ranked because it has no landed date in Unleashed.
+ * The weekly specials email to the office: the rules, this week's picks, and
+ * any category that came up short.
  *
  * @param {{ report: object }} input Result of `syncWeeklySpecials`.
  */
 export function buildWeeklySpecialsSummary({ report }) {
   const specials = report?.specials ?? [];
-  const undated = report?.undated ?? [];
   const shortfalls = report?.shortfalls ?? [];
   const failed = (report?.results ?? []).filter((row) => row.error).length;
   const perCategory = report?.perCategory ?? 0;
 
   let health = SYNC_HEALTH.OK;
-  if (undated.length > 0 || shortfalls.length > 0) health = SYNC_HEALTH.WARN;
+  if (shortfalls.length > 0) health = SYNC_HEALTH.WARN;
   if (failed > 0 || (report?.heldRemovals ?? []).length > 0) health = SYNC_HEALTH.ALERT;
-
-  const headline =
-    undated.length > 0
-      ? `${specials.length} on this week, ${undated.length} need a landed date`
-      : `${specials.length} on this week`;
 
   const rows = [
     ['Qualifying products', report?.qualifying ?? 0],
     ['…picked this week', specials.length],
-    ['…no landed date', undated.length],
   ];
   for (const [category, label] of Object.entries(SPECIAL_CATEGORY_LABEL)) {
     rows.push([`${label} picked`, `${specials.filter((row) => row.category === category).length} of ${perCategory}`]);
   }
 
   const reasons = [
-    `Rules: in stock in warehouse ${report?.warehouse}, not sold since ${report?.unsoldSince}, ` +
-      'most recently landed first. Products on the website only.',
+    `Rules: in stock in warehouse ${report?.warehouse}; not from a current supplier ` +
+      `(${(report?.currentSuppliers ?? []).join(', ')}); neither it nor anything in the same bin location ` +
+      `sold since ${report?.unsoldSince}; oldest landed first. Products on the website only.`,
+    `Stock with no purchase order in Unleashed landed before the March 2024 setup, so it shows as ` +
+      `"${LANDED_BEFORE_UNLEASHED}" and goes first.`,
   ];
   for (const shortfall of shortfalls) {
     reasons.push(
       `${SPECIAL_CATEGORY_LABEL[shortfall.category]}: only ${shortfall.picked} of ${shortfall.wanted} ` +
-        'qualifying products have a landed date.',
-    );
-  }
-  if (undated.length > 0) {
-    reasons.push(
-      `${undated.length} product(s) qualify but have no purchase order receipt in Unleashed, so they ` +
-        'cannot be ranked by landed date and were left out. Most are stock from the March 2024 Unleashed ' +
-        'setup. The full list is in the attached CSV.',
+        'products meet the rules.',
     );
   }
   if (failed > 0) reasons.push(`${failed} tag change(s) on Shopify failed; the log has the errors.`);
@@ -752,28 +740,21 @@ export function buildWeeklySpecialsSummary({ report }) {
   }
   if (report?.dryRun) reasons.push('Dry run: nothing was changed on the website.');
 
-  const inline = undated.slice(0, WEEKLY_SPECIALS_INLINE_LIMIT).map((row) => ({
-    productCode: row.productCodes.join(' / '),
+  const picks = specials.map((row) => ({
+    productCode: row.code,
     outcome: SPECIAL_CATEGORY_LABEL[row.category],
-    note: truncate(String(row.title || row.description).replace(/\s+/g, ' ').trim()),
+    note: truncate(`${row.title} (landed ${row.landed}, last sold ${row.lastSold})`.replace(/\s+/g, ' ').trim()),
   }));
-  if (undated.length > inline.length) {
-    inline.push({
-      productCode: `…and ${undated.length - inline.length} more in the attached CSV`,
-      outcome: '',
-      note: '',
-    });
-  }
 
   const title = 'This Week Specials';
-  const problemHeading = 'Qualifying products with no landed date';
+  const problemHeading = "This week's picks";
 
   return {
     health,
     reasons,
-    subject: `[${EMAIL_SUBJECT_TAG[health]}] This Week Specials — ${headline}`,
-    text: buildText({ title, rows, reasons, problems: inline, problemHeading }),
-    html: buildHtml({ title, health, rows, reasons, problems: inline, problemHeading }),
+    subject: `[${EMAIL_SUBJECT_TAG[health]}] This Week Specials — ${specials.length} on this week`,
+    text: buildText({ title, rows, reasons, problems: picks, problemHeading }),
+    html: buildHtml({ title, health, rows, reasons, problems: picks, problemHeading }),
   };
 }
 
@@ -783,34 +764,16 @@ export function buildWeeklySpecialsSummary({ report }) {
  * @param {object} report Result of `syncWeeklySpecials`.
  */
 export function buildWeeklySpecialsCsv(report) {
-  const lines = ['category,product_code,website_title,landed'];
+  const lines = ['category,product_code,website_title,supplier,landed,related_last_sold'];
   for (const row of report?.specials ?? []) {
     lines.push(
       [
         csvCell(SPECIAL_CATEGORY_LABEL[row.category]),
         csvCell(row.code),
         csvCell(row.title),
+        csvCell(row.supplier),
         csvCell(row.landed),
-      ].join(','),
-    );
-  }
-  return lines.join('\n');
-}
-
-/**
- * Qualifying products with no landed date, as CSV for the office.
- *
- * @param {object} report Result of `syncWeeklySpecials`.
- */
-export function buildUndatedSpecialsCsv(report) {
-  const lines = ['category,product_codes_in_stock,website_title,description'];
-  for (const row of report?.undated ?? []) {
-    lines.push(
-      [
-        csvCell(SPECIAL_CATEGORY_LABEL[row.category]),
-        csvCell(row.productCodes.join(' ')),
-        csvCell(row.title),
-        csvCell(row.description),
+        csvCell(row.lastSold),
       ].join(','),
     );
   }

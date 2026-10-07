@@ -1,4 +1,7 @@
 import {
+  LANDED_BEFORE_UNLEASHED,
+  MS_PER_DAY,
+  NO_SALE_ON_RECORD,
   SMART_COLLECTION_SETTLE_MS,
   SPECIAL_CATEGORY_ORDER,
   WEEKLY_SPECIAL_OUTCOME,
@@ -18,14 +21,15 @@ const describeSpecial = (change) => ({
   code: change.code ?? '',
   title: change.title ?? '',
   category: change.category ?? '',
-  landed: toDay(change.landedMs),
+  landed: change.landedMs ? toDay(change.landedMs) : LANDED_BEFORE_UNLEASHED,
 });
 
 /**
  * Picks this week's specials and moves the `weekly-special` tag onto them:
  * `config.weeklySpecialsPerCategory` products from each category, from stock
- * in the warehouse that has not sold in `config.weeklySpecialsUnsoldMonths`
- * months, most recently landed first. Then orders the collection the same way.
+ * in the warehouse from a supplier not in `config.weeklySpecialsCurrentSuppliers`,
+ * where nothing in the same bin has sold in `config.weeklySpecialsUnsoldMonths`
+ * months, oldest landed first. Then orders the collection the same way.
  * The collection's own rule adds "in stock", so a piece that sells mid-week
  * drops off.
  *
@@ -64,6 +68,8 @@ export async function syncWeeklySpecials({
     nowMs,
     cutoffMs,
     perCategory: config.weeklySpecialsPerCategory,
+    warehouseCode: config.weeklySpecialsWarehouse,
+    currentSuppliers: new Set(config.weeklySpecialsCurrentSuppliers.map((name) => name.trim().toLowerCase())),
     force,
   });
   if (plan.heldRemovals.length) {
@@ -93,7 +99,8 @@ export async function syncWeeklySpecials({
       writes,
       log,
       label: LABEL,
-      dateOf: (entry) => entry.landedMs,
+      // Ascending rank: the orderer puts the largest value first.
+      dateOf: (entry) => -entry.rank,
     });
   } catch (error) {
     ordering = { status: `failed — ${error.message}` };
@@ -102,19 +109,25 @@ export async function syncWeeklySpecials({
   const specials = [...plan.wanted.values()]
     .sort(
       (a, b) =>
-        SPECIAL_CATEGORY_ORDER.indexOf(a.category) - SPECIAL_CATEGORY_ORDER.indexOf(b.category) ||
-        b.landedMs - a.landedMs,
+        SPECIAL_CATEGORY_ORDER.indexOf(a.category) - SPECIAL_CATEGORY_ORDER.indexOf(b.category) || a.rank - b.rank,
     )
-    .map((entry) => ({ ...entry, landed: toDay(entry.landedMs) }));
+    .map((entry) => ({
+      ...entry,
+      landed: entry.landedMs ? toDay(entry.landedMs) : LANDED_BEFORE_UNLEASHED,
+      lastSold:
+        entry.designDaysSinceSale === null
+          ? NO_SALE_ON_RECORD
+          : toDay(nowMs - entry.designDaysSinceSale * MS_PER_DAY),
+    }));
 
   return {
     unsoldSince: toDay(cutoffMs),
     perCategory: config.weeklySpecialsPerCategory,
     warehouse: config.weeklySpecialsWarehouse,
+    currentSuppliers: config.weeklySpecialsCurrentSuppliers,
     scanned: products.length,
     qualifying: plan.qualifying,
     specials,
-    undated: plan.undated,
     shortfalls: plan.shortfalls,
     ambiguous: plan.ambiguous,
     taggedBefore: tagged.size,

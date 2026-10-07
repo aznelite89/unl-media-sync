@@ -5,21 +5,17 @@ import { loadConfig } from '../utils/config.js';
 import { toAttachment } from '../utils/email.js';
 import { toLog } from '../utils/logger.js';
 import { sendReport } from '../utils/notify.js';
-import {
-  buildUndatedSpecialsCsv,
-  buildWeeklySpecialsCsv,
-  buildWeeklySpecialsSummary,
-} from '../utils/report.js';
+import { buildWeeklySpecialsCsv, buildWeeklySpecialsSummary } from '../utils/report.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import { createUnleashedClient } from '../utils/unleashed.js';
 import { syncWeeklySpecials } from '../utils/weeklySpecials.js';
 
 /**
  * Picks This Week Specials every Monday: 12 each of chains & bracelets,
- * earrings, rings and pendants, from warehouse stock that has not sold in 18
- * months, most recently landed first. Moves the `weekly-special` tag, orders
- * the collection, and emails the office the picks plus the qualifying stock
- * that has no landed date. No-op until SYNC_WEEKLY_SPECIALS is true;
+ * earrings, rings and pendants, from warehouse stock of suppliers Searay no
+ * longer buys from, where nothing in the same bin has sold in 24 months,
+ * oldest landed first. Moves the `weekly-special` tag, orders the collection,
+ * and emails the office the picks. No-op until SYNC_WEEKLY_SPECIALS is true;
  * DRY_RUN=true reports only.
  */
 async function handler(timer, context) {
@@ -58,7 +54,7 @@ async function handler(timer, context) {
 
   log.info(
     `weekly specials: ${report.specials.length} picked of ${report.qualifying} qualifying, ` +
-      `${report.undated.length} without a landed date, outcomes ${JSON.stringify(report.byOutcome)}, ` +
+      `outcomes ${JSON.stringify(report.byOutcome)}, ` +
       `order: ${report.ordering.status}${report.dryRun ? ' (DRY RUN)' : ''}`,
   );
   for (const result of report.results) {
@@ -68,9 +64,6 @@ async function handler(timer, context) {
   }
 
   const attachments = [toAttachment('this-week-specials.csv', buildWeeklySpecialsCsv(report))];
-  if (report.undated.length) {
-    attachments.push(toAttachment('specials-without-landed-date.csv', buildUndatedSpecialsCsv(report)));
-  }
   const delivery = await sendReport({
     config,
     summary: buildWeeklySpecialsSummary({ report }),
