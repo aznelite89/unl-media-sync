@@ -40,6 +40,7 @@ const ALL_VARIANT_SKUS = /* GraphQL */ `
     productVariants(first: $first, after: $after) {
       nodes {
         sku
+        price
         product {
           id
           title
@@ -426,6 +427,8 @@ export function createShopifyClient(config, log = console) {
             productCount: 1,
             hasImage: Boolean(node.product?.featuredMedia),
             productType: node.product?.productType ?? '',
+            // The variant's own price; null when Shopify sends none.
+            price: node.price == null ? null : Number(node.price),
             // Active and published to the Online Store: a shopper can see it.
             onWebsite: Boolean(node.product?.onlineStoreUrl),
           });

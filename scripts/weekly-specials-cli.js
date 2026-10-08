@@ -71,7 +71,8 @@ const report = await syncWeeklySpecials({
 console.log('\nThis week:');
 for (const row of report.specials) {
   console.log(
-    `  ${SPECIAL_CATEGORY_LABEL[row.category].padEnd(19)} ${row.landed.padEnd(15)} ${row.lastSold.padEnd(17)} ` +
+    `  ${SPECIAL_CATEGORY_LABEL[row.category].padEnd(19)} ${String(row.price ?? '').padStart(8)} ` +
+      `${row.landed.padEnd(15)} ${row.lastSold.padEnd(17)} ` +
       `${row.code.padEnd(18)} ${row.supplier.padEnd(14)} ${row.title}`,
   );
 }

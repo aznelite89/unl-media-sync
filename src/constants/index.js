@@ -640,7 +640,8 @@ export const WEBSITE_IMAGE_STATUS_LABEL = {
  * from each of four categories. A piece qualifies when it is in stock in the
  * main warehouse, comes from a supplier Searay no longer buys from, and
  * neither it nor any related product (same warehouse bin location) has sold in
- * 24 months. Oldest landed first.
+ * 24 months, and is priced over $80. Oldest landed are picked first; the
+ * collection then shows them most expensive first.
  *
  * "Landed" is the latest purchase order receipt. Stock loaded at the March 2024
  * Unleashed setup has none; it landed before every receipt, so it goes first.
@@ -652,6 +653,8 @@ export const WEEKLY_SPECIAL_TAG = 'weekly-special';
 export const DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE = 'sale';
 export const DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY = 12;
 export const DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS = 24;
+/** A special must cost more than this on the website (Shopify variant price, AUD). */
+export const DEFAULT_WEEKLY_SPECIALS_MIN_PRICE = 80;
 /** "1. Warehouse", the stock the office can pick from. */
 export const DEFAULT_WEEKLY_SPECIALS_WAREHOUSE = 'WH';
 

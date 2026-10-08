@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-08
+
+### Added
+- `WEEKLY_SPECIALS_MIN_PRICE` setting (default `80`).
+- Variant price on the Shopify SKU listing.
+- Price in the This Week Specials email, CSV and CLI output.
+
+### Changed
+- This Week Specials only picks products priced over $80.
+- This Week Specials collection ordered most expensive first.
+
 ## 2026-10-07
 
 ### Added

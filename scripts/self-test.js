@@ -2976,7 +2976,7 @@ const WS_DAY = 86_400_000;
 const WS_CURRENT = new Set(['divya', 'lotus']);
 const wsDate = (y, m, d) => `/Date(${Date.UTC(y, m - 1, d)})/`;
 const wsSku = (productId, productType, extra = {}) => ({
-  productId, title: productId, productCount: 1, productType, onWebsite: true, ...extra,
+  productId, title: productId, productCount: 1, productType, onWebsite: true, price: 100, ...extra,
 });
 const wsBin = (bin) => [
   { Warehouse: { WarehouseCode: 'VIC' }, BinLocation: 'VIC1' },
@@ -3005,7 +3005,7 @@ function wsInput({ rows, tagged = [], perCategory = 2 }) {
   }
   return {
     products, daysSinceSale, warehouseQty, landed, skus, tagged: new Set(tagged),
-    nowMs: WS_NOW, cutoffMs: WS_CUTOFF, perCategory, warehouseCode: 'WH', currentSuppliers: WS_CURRENT,
+    nowMs: WS_NOW, cutoffMs: WS_CUTOFF, perCategory, minPrice: 80, warehouseCode: 'WH', currentSuppliers: WS_CURRENT,
   };
 }
 
@@ -3066,6 +3066,41 @@ test('specials skip current suppliers, recent sales, new products, no warehouse 
     ],
   }));
   assert.deepEqual([...plan.wanted.keys()].sort(), ['P_NOSUPPLIER', 'P_OK1', 'P_OLDSUPPLIER', 'P_SOLDLONGAGO']);
+});
+
+test('specials must be priced over the minimum, judged by an in-stock variant', () => {
+  const plan = planWeeklySpecials(wsInput({
+    perCategory: 20,
+    rows: [
+      { code: 'DEAR', sku: { price: 80.01 } },
+      { code: 'EXACTLY80', sku: { price: 80 } },
+      { code: 'CHEAP', sku: { price: 45 } },
+      { code: 'UNPRICED', sku: { price: null } },
+      // A ring whose only dear size is out of stock does not count.
+      { code: 'R2SIZEM', productId: 'P_R2', sku: { price: 60 } },
+      { code: 'R2SIZEZ', productId: 'P_R2', qty: 0, sku: { price: 120 } },
+      // Its dear size in stock does, and that size stands for the product.
+      { code: 'R3SIZEM', productId: 'P_R3', sku: { price: 60 } },
+      { code: 'R3SIZEZ', productId: 'P_R3', sku: { price: 120 } },
+    ],
+  }));
+  assert.deepEqual([...plan.wanted.keys()].sort(), ['P_DEAR', 'P_R3']);
+  assert.equal(plan.wanted.get('P_R3').code, 'R3SIZEZ');
+  assert.equal(plan.wanted.get('P_R3').price, 120);
+});
+
+test('specials are picked oldest first but shown most expensive first', () => {
+  const plan = planWeeklySpecials(wsInput({
+    perCategory: 2,
+    rows: [
+      { code: 'OLDCHEAP', landedMs: WS_NOW - 1000 * WS_DAY, sku: { price: 90 } },
+      { code: 'OLDDEAR', landedMs: WS_NOW - 900 * WS_DAY, sku: { price: 500 } },
+      // Dearest of all, but too recently landed to be picked.
+      { code: 'NEWDEAR', landedMs: WS_NOW - 800 * WS_DAY, sku: { price: 900 } },
+    ],
+  }));
+  const ranked = [...plan.wanted.values()].sort((a, b) => a.rank - b.rank).map((entry) => entry.productId);
+  assert.deepEqual(ranked, ['P_OLDDEAR', 'P_OLDCHEAP']);
 });
 
 test('a sale of anything in the same bin keeps a product off the specials', () => {
@@ -3133,7 +3168,7 @@ test("specials replace last week's tags; an empty pick keeps them unless forced"
   assert.deepEqual(forced.remove, ['P_LAST']);
 });
 
-test('syncWeeklySpecials tags, untags and orders oldest landed first', async () => {
+test('syncWeeklySpecials tags, untags and orders most expensive first', async () => {
   const calls = { add: [], remove: [], reorder: [] };
   const landedOn = WS_NOW - 800 * WS_DAY;
   const unleashed = {
@@ -3158,8 +3193,8 @@ test('syncWeeklySpecials tags, untags and orders oldest landed first', async () 
   const shopify = {
     async listAllVariantSkus() {
       return new Map([
-        ['ra', wsSku('P_RA', 'Rings')],
-        ['rb', wsSku('P_RB', 'Diamond Rings')],
+        ['ra', wsSku('P_RA', 'Rings', { price: 250 })],
+        ['rb', wsSku('P_RB', 'Diamond Rings', { price: 95.5 })],
         ['rc', wsSku('P_RC', 'Rings')],
       ]);
     },
@@ -3175,14 +3210,14 @@ test('syncWeeklySpecials tags, untags and orders oldest landed first', async () 
       calls.remove.push(productId);
     },
     async getCollectionProducts() {
-      return { id: 'C', sortOrder: 'MANUAL', rules: [], productIds: ['P_RA', 'P_RB'] };
+      return { id: 'C', sortOrder: 'MANUAL', rules: [], productIds: ['P_RB', 'P_RA'] };
     },
     async reorderCollection({ moves }) {
       calls.reorder.push(...moves);
     },
   };
   const config = {
-    weeklySpecialsUnsoldMonths: 24, weeklySpecialsPerCategory: 12, weeklySpecialsWarehouse: 'WH',
+    weeklySpecialsUnsoldMonths: 24, weeklySpecialsPerCategory: 12, weeklySpecialsMinPrice: 80, weeklySpecialsWarehouse: 'WH',
     weeklySpecialsCurrentSuppliers: ['Divya'], weeklySpecialsCollectionHandle: 'sale', dryRun: false,
   };
   const report = await syncWeeklySpecials({
@@ -3190,10 +3225,10 @@ test('syncWeeklySpecials tags, untags and orders oldest landed first', async () 
   });
   assert.deepEqual(calls.add.sort(), ['P_RA', 'P_RB']);
   assert.deepEqual(calls.remove, ['P_LAST']);
-  assert.deepEqual(calls.reorder.map((m) => m.id), ['P_RB', 'P_RA']);
-  assert.deepEqual(report.specials.map((row) => [row.code, row.landed, row.lastSold]), [
-    ['RB', 'before Mar 2024', new Date(WS_NOW - 800 * WS_DAY).toISOString().slice(0, 10)],
-    ['RA', new Date(landedOn).toISOString().slice(0, 10), 'no sale on record'],
+  assert.deepEqual(calls.reorder.map((m) => m.id), ['P_RA', 'P_RB']);
+  assert.deepEqual(report.specials.map((row) => [row.code, row.price, row.landed, row.lastSold]), [
+    ['RA', 250, new Date(landedOn).toISOString().slice(0, 10), 'no sale on record'],
+    ['RB', 95.5, 'before Mar 2024', new Date(WS_NOW - 800 * WS_DAY).toISOString().slice(0, 10)],
   ]);
 
   const dry = await syncWeeklySpecials({
@@ -3205,9 +3240,9 @@ test('syncWeeklySpecials tags, untags and orders oldest landed first', async () 
 
 test('the specials email lists the picks and warns on a short category', () => {
   const report = {
-    perCategory: 12, warehouse: 'WH', unsoldSince: '2024-10-07', qualifying: 3, currentSuppliers: ['Divya'],
+    perCategory: 12, minPrice: 80, warehouse: 'WH', unsoldSince: '2024-10-07', qualifying: 3, currentSuppliers: ['Divya'],
     specials: [{
-      category: SPECIAL_CATEGORY.RINGS, code: '9KX1', title: 'Ring, gold', supplier: 'Hem',
+      category: SPECIAL_CATEGORY.RINGS, code: '9KX1', title: 'Ring, gold', supplier: 'Hem', price: 129.5,
       landed: 'before Mar 2024', lastSold: 'no sale on record',
     }],
     shortfalls: [{ category: SPECIAL_CATEGORY.EARRINGS, picked: 0, wanted: 12 }],
@@ -3219,7 +3254,9 @@ test('the specials email lists the picks and warns on a short category', () => {
   assert.ok(summary.text.includes('Earrings: only 0 of 12'));
   assert.ok(summary.text.includes('9KX1'));
   assert.ok(summary.text.includes('Divya'));
-  assert.ok(buildWeeklySpecialsCsv(report).includes('Rings,9KX1,"Ring, gold",Hem,before Mar 2024,no sale on record'));
+  assert.ok(summary.text.includes('priced over $80'));
+  assert.ok(summary.text.includes('$129.50'));
+  assert.ok(buildWeeklySpecialsCsv(report).includes('Rings,9KX1,"Ring, gold",129.5,Hem,before Mar 2024,no sale on record'));
 });
 
 let failures = 0;

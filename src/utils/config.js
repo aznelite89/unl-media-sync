@@ -11,6 +11,7 @@ import {
   DEFAULT_NEW_ARRIVAL_MONTHS,
   DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
   DEFAULT_WEEKLY_SPECIALS_CURRENT_SUPPLIERS,
+  DEFAULT_WEEKLY_SPECIALS_MIN_PRICE,
   DEFAULT_WEEKLY_SPECIALS_PER_CATEGORY,
   DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
   DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
@@ -142,6 +143,8 @@ export function loadConfig(options = {}) {
       process.env.WEEKLY_SPECIALS_UNSOLD_MONTHS,
       DEFAULT_WEEKLY_SPECIALS_UNSOLD_MONTHS,
     ),
+    /** Only pieces priced over this many dollars on the website can be specials. */
+    weeklySpecialsMinPrice: readInt(process.env.WEEKLY_SPECIALS_MIN_PRICE, DEFAULT_WEEKLY_SPECIALS_MIN_PRICE),
     weeklySpecialsWarehouse: process.env.WEEKLY_SPECIALS_WAREHOUSE || DEFAULT_WEEKLY_SPECIALS_WAREHOUSE,
     /** Unleashed supplier names Searay still buys from; their stock is never a special. */
     weeklySpecialsCurrentSuppliers: readList(

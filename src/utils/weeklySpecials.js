@@ -21,6 +21,7 @@ const describeSpecial = (change) => ({
   code: change.code ?? '',
   title: change.title ?? '',
   category: change.category ?? '',
+  price: change.price ?? null,
   landed: change.landedMs ? toDay(change.landedMs) : LANDED_BEFORE_UNLEASHED,
 });
 
@@ -29,7 +30,8 @@ const describeSpecial = (change) => ({
  * `config.weeklySpecialsPerCategory` products from each category, from stock
  * in the warehouse from a supplier not in `config.weeklySpecialsCurrentSuppliers`,
  * where nothing in the same bin has sold in `config.weeklySpecialsUnsoldMonths`
- * months, oldest landed first. Then orders the collection the same way.
+ * months, priced over `config.weeklySpecialsMinPrice`, oldest landed first.
+ * Then orders the collection most expensive first.
  * The collection's own rule adds "in stock", so a piece that sells mid-week
  * drops off.
  *
@@ -68,6 +70,7 @@ export async function syncWeeklySpecials({
     nowMs,
     cutoffMs,
     perCategory: config.weeklySpecialsPerCategory,
+    minPrice: config.weeklySpecialsMinPrice,
     warehouseCode: config.weeklySpecialsWarehouse,
     currentSuppliers: new Set(config.weeklySpecialsCurrentSuppliers.map((name) => name.trim().toLowerCase())),
     force,
@@ -123,6 +126,7 @@ export async function syncWeeklySpecials({
   return {
     unsoldSince: toDay(cutoffMs),
     perCategory: config.weeklySpecialsPerCategory,
+    minPrice: config.weeklySpecialsMinPrice,
     warehouse: config.weeklySpecialsWarehouse,
     currentSuppliers: config.weeklySpecialsCurrentSuppliers,
     scanned: products.length,

@@ -721,7 +721,8 @@ export function buildWeeklySpecialsSummary({ report }) {
   const reasons = [
     `Rules: in stock in warehouse ${report?.warehouse}; not from a current supplier ` +
       `(${(report?.currentSuppliers ?? []).join(', ')}); neither it nor anything in the same bin location ` +
-      `sold since ${report?.unsoldSince}; oldest landed first. Products on the website only.`,
+      `sold since ${report?.unsoldSince}; priced over $${report?.minPrice}; oldest landed picked first, ` +
+      'shown most expensive first. Products on the website only.',
     `Stock with no purchase order in Unleashed landed before the March 2024 setup, so it shows as ` +
       `"${LANDED_BEFORE_UNLEASHED}" and goes first.`,
   ];
@@ -743,7 +744,7 @@ export function buildWeeklySpecialsSummary({ report }) {
   const picks = specials.map((row) => ({
     productCode: row.code,
     outcome: SPECIAL_CATEGORY_LABEL[row.category],
-    note: truncate(`${row.title} (landed ${row.landed}, last sold ${row.lastSold})`.replace(/\s+/g, ' ').trim()),
+    note: truncate(`${row.title} (${formatPrice(row.price)}, landed ${row.landed}, last sold ${row.lastSold})`.replace(/\s+/g, ' ').trim()),
   }));
 
   const title = 'This Week Specials';
@@ -758,19 +759,23 @@ export function buildWeeklySpecialsSummary({ report }) {
   };
 }
 
+/** A website price as "$123.45", or blank when unknown. */
+const formatPrice = (price) => (Number.isFinite(price) ? `$${price.toFixed(2)}` : '');
+
 /**
  * This week's picks as CSV.
  *
  * @param {object} report Result of `syncWeeklySpecials`.
  */
 export function buildWeeklySpecialsCsv(report) {
-  const lines = ['category,product_code,website_title,supplier,landed,related_last_sold'];
+  const lines = ['category,product_code,website_title,price,supplier,landed,related_last_sold'];
   for (const row of report?.specials ?? []) {
     lines.push(
       [
         csvCell(SPECIAL_CATEGORY_LABEL[row.category]),
         csvCell(row.code),
         csvCell(row.title),
+        csvCell(row.price ?? ''),
         csvCell(row.supplier),
         csvCell(row.landed),
         csvCell(row.lastSold),

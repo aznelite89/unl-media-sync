@@ -139,12 +139,17 @@ function oldestFirst(a, b) {
   );
 }
 
+/** Collection order: most expensive first. */
+function dearestFirst(a, b) {
+  return b.price - a.price || oldestFirst(a, b);
+}
+
 /**
  * Which Shopify products are this week's specials, and the tag changes that
  * get there.
  *
  * A website product qualifies when, across all its Unleashed codes:
- *   - one of them is in stock in the warehouse,
+ *   - one of them is in stock in the warehouse and priced over `minPrice`,
  *   - every one comes from a supplier not in `currentSuppliers`,
  *   - nothing related to any of them (same bin, see `relatedKey`) sold in the
  *     last `unsoldMonths` months,
@@ -152,19 +157,20 @@ function oldestFirst(a, b) {
  *   - its product type is in one of the four categories.
  * They are ranked oldest landed first, then longest unsold, then by a
  * shuffle that changes weekly, one per bin, and the first `perCategory` of
- * each category are picked. `rank` on each pick is its place
- * in the collection.
+ * each category are picked. `rank` on each pick is its place in the
+ * collection: most expensive first.
  *
  * @param {{
  *   products: object[],
  *   daysSinceSale: Map<string, number | null>,
  *   warehouseQty: Map<string, number>,
  *   landed: Map<string, number>,
- *   skus: Map<string, { productId: string, title: string, productCount: number, productType: string, onWebsite: boolean }>,
+ *   skus: Map<string, { productId: string, title: string, productCount: number, productType: string, onWebsite: boolean, price: number | null }>,
  *   tagged: Set<string>,
  *   nowMs: number,
  *   cutoffMs: number,
  *   perCategory: number,
+ *   minPrice: number,
  *   warehouseCode: string,
  *   currentSuppliers: Set<string>,
  *   force?: boolean,
@@ -180,6 +186,7 @@ export function planWeeklySpecials({
   nowMs,
   cutoffMs,
   perCategory,
+  minPrice,
   warehouseCode,
   currentSuppliers,
   force = false,
@@ -216,6 +223,7 @@ export function planWeeklySpecials({
       current: fromCurrentSupplier(product, currentSuppliers),
       createdMs: parseUnleashedDate(product?.CreatedOn),
       qty: Number(warehouseQty.get(code) ?? 0),
+      price: Number.isFinite(match.price) ? match.price : null,
       landedMs: landed.get(code) ?? null,
     });
   }
@@ -227,7 +235,10 @@ export function planWeeklySpecials({
     if (!listing.onWebsite) continue;
     const category = specialCategory(listing.productType);
     if (!category) continue;
-    const inStock = listing.codes.filter((entry) => entry.qty > 0);
+    // The dearest in-stock variant over the minimum stands for the product.
+    const inStock = listing.codes
+      .filter((entry) => entry.qty > 0 && entry.price !== null && entry.price > minPrice)
+      .sort((a, b) => b.price - a.price);
     if (inStock.length === 0) continue;
     if (listing.codes.some((entry) => entry.current)) continue;
     const keys = [...new Set(listing.codes.map((entry) => entry.key))];
@@ -247,6 +258,7 @@ export function planWeeklySpecials({
       category,
       code: inStock[0].productCode,
       supplier: inStock[0].supplier,
+      price: inStock[0].price,
       landedMs,
       designDaysSinceSale,
       shuffle: weeklyShuffle(inStock[0].code, nowMs),
@@ -269,7 +281,7 @@ export function planWeeklySpecials({
     }
     if (picked < perCategory) shortfalls.push({ category, picked, wanted: perCategory });
   }
-  [...wanted.values()].sort(oldestFirst).forEach((entry, index) => {
+  [...wanted.values()].sort(dearestFirst).forEach((entry, index) => {
     entry.rank = index;
   });
 
