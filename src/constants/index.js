@@ -742,3 +742,61 @@ export const LANDED_BEFORE_UNLEASHED = 'before Mar 2024';
 /** Shown in place of a last sale date when no product in the group has one. */
 export const NO_SALE_ON_RECORD = 'no sale on record';
 
+
+/**
+ * Customer fields restore (2026-10-09).
+ *
+ * A partial-body customer update from the attribute sync app on 2026-10-07
+ * blanked every field it did not send on 628 customers. The values come back
+ * from a Customers export taken from the Unleashed sandbox, a copy of
+ * production from before the wipe. Each entry is [API field, export column,
+ * kind]; a field is written only where production holds nothing, so anything
+ * typed since the wipe stays.
+ */
+export const CUSTOMER_EXPORT_CODE_COLUMN = '*Customer Code';
+export const CUSTOMER_EXPORT_MODIFIED_COLUMN = 'Last Modified On';
+export const CUSTOMER_RESTORE_KIND = {
+  TEXT: 'text',
+  BOOL: 'bool',
+  NUMBER: 'number',
+  PERCENT: 'percent',
+  TAX_CODE: 'taxCode',
+  SALESPERSON: 'salesperson',
+  WAREHOUSE: 'warehouse',
+};
+export const CUSTOMER_RESTORE_COLUMNS = [
+  ['SalesPerson', 'Salesperson', CUSTOMER_RESTORE_KIND.SALESPERSON],
+  ['TaxCode', 'Tax Code', CUSTOMER_RESTORE_KIND.TAX_CODE],
+  ['DiscountRate', 'Discount (%)', CUSTOMER_RESTORE_KIND.PERCENT],
+  ['DefaultWarehouse', 'Default Warehouse Code', CUSTOMER_RESTORE_KIND.WAREHOUSE],
+  ['DeliveryMethod', 'Delivery Method Name', CUSTOMER_RESTORE_KIND.TEXT],
+  ['SalesOrderGroup', 'Sales Group Name', CUSTOMER_RESTORE_KIND.TEXT],
+  ['GSTVATNumber', 'GST/VAT Number', CUSTOMER_RESTORE_KIND.TEXT],
+  ['BankName', 'Bank Name', CUSTOMER_RESTORE_KIND.TEXT],
+  ['BankAccount', 'Bank Account', CUSTOMER_RESTORE_KIND.TEXT],
+  ['Website', 'Website', CUSTOMER_RESTORE_KIND.TEXT],
+  ['EmailCC', 'Email CC Address', CUSTOMER_RESTORE_KIND.TEXT],
+  ['FaxNumber', 'Fax Number', CUSTOMER_RESTORE_KIND.TEXT],
+  ['DDINumber', 'DDI Number', CUSTOMER_RESTORE_KIND.TEXT],
+  ['TollFreeNumber', 'Toll Free Number', CUSTOMER_RESTORE_KIND.TEXT],
+  ['HasCreditLimit', 'Has Credit Limit', CUSTOMER_RESTORE_KIND.BOOL],
+  ['CreditLimit', 'Credit Limit', CUSTOMER_RESTORE_KIND.NUMBER],
+  ['CustomerType', 'Customer Type', CUSTOMER_RESTORE_KIND.TEXT],
+  ['PaymentTerm', 'Payment Terms', CUSTOMER_RESTORE_KIND.TEXT],
+  ['SellPriceTier', 'Sell Price Tier', CUSTOMER_RESTORE_KIND.TEXT],
+  ['Notes', 'Notes', CUSTOMER_RESTORE_KIND.TEXT],
+];
+/** TaxRate is not in the export; it follows the tax code, as every production customer shows. */
+export const TAX_RATE_BY_CODE = { 'G.S.T.': 0.1, NONE: 0 };
+/** The export's "Discount (%)" is a percentage; the API's DiscountRate is a fraction. */
+export const PERCENT_DIVISOR = 100;
+/** The export writes a salesperson as "Full Name: email". */
+export const SALESPERSON_EXPORT_SEPARATOR = ': ';
+export const TAX_RATE_FIELD = 'TaxRate';
+export const RESTORE_OUTCOME = {
+  RESTORED: 'restored',
+  UNCHANGED: 'unchanged',
+  DRY_RUN: 'dry_run',
+  FAILED: 'failed',
+  NOT_IN_EXPORT: 'not_in_export',
+};

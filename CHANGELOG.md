@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-09
+
+### Added
+- `scripts/customer-fields-restore-cli.js`: puts blank customer fields back from a Customers export (the sandbox copy from before the 2026-10-07 wipe), whole record sent, fill-the-blank only, re-read and drift-checked; preview and applied CSVs under `reports/`.
+
 ## 2026-10-08
 
 ### Added

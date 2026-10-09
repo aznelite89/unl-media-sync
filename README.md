@@ -468,6 +468,29 @@ node scripts/customer-suburb-cli.js --all --apply               # backfill
 
 The CLI's `--apply` writes regardless of `FILL_CUSTOMER_SUBURB`; `DRY_RUN=true` blocks both.
 
+### Customer fields restore
+
+One-off repair, kept because the shape (export in, whole record out, nothing overwritten) is the
+right one for the next time a field goes missing. On 2026-10-07 a partial-body customer update from
+the attribute sync app blanked every field it did not send on 628 customers: Sales Person, Tax
+Code/Rate, Discount, Default Warehouse, Delivery Method, Sales Group (the UI's Billing Type), GST
+number, bank details, credit limit and Notes. The Notes came back from the notes guard's snapshot
+(above). The rest come from a Customers export taken from the Unleashed **sandbox**, which was a copy
+of production as at 2 Oct 2026.
+
+The CLI maps export columns to API fields (`CUSTOMER_RESTORE_COLUMNS`), turns a salesperson
+"Name: email" into the Guid other production customers carry, a warehouse code into its Guid, a
+percentage discount into the API's fraction and a tax code into its rate, and writes a field **only
+where production holds nothing**. A production value that differs from the export is listed as
+`kept`, never overwritten, because it may have been typed since. Every write sends the whole record,
+re-reads it and reports any unplanned field that moved.
+
+```bash
+node scripts/customer-fields-restore-cli.js --export reports/customers-sandbox-export-2026-10-09.csv --codes codes.txt          # preview CSV, nothing written
+node scripts/customer-fields-restore-cli.js --export reports/customers-sandbox-export-2026-10-09.csv --code AJ027 --apply       # one customer, verified
+node scripts/customer-fields-restore-cli.js --export reports/customers-sandbox-export-2026-10-09.csv --codes codes.txt --apply  # the lot; re-running is harmless
+```
+
 ### Customer notes guard
 
 On every website order the connector also copies the Shopify customer's `note` into the Unleashed
