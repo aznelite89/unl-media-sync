@@ -695,7 +695,7 @@ Deliveries older than 5 minutes are rejected.
 | `WEEKLY_SPECIALS_UNSOLD_MONTHS` | `24` | how long a product and everything in its bin must have gone without a sale |
 | `WEEKLY_SPECIALS_MIN_PRICE` | `80` | a special's website price must be more than this many dollars |
 | `WEEKLY_SPECIALS_WAREHOUSE` | `WH` | the warehouse the stock must be in, and whose bin locations relate products |
-| `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` | `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, Lotus, D.N. Jewels, DAUB A.D` | Unleashed supplier names Searay still buys from; their stock is never a special. Setting it replaces the list |
+| `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` | `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, D.N. Jewels, DAUB A.D` | Unleashed supplier names Searay still buys from; their stock is never a special. Setting it replaces the list |
 | `WEEKLY_SPECIALS_COLLECTION_HANDLE` | `sale` | the collection the timer orders |
 
 ## Suggested rollout

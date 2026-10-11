@@ -667,7 +667,6 @@ export const DEFAULT_WEEKLY_SPECIALS_CURRENT_SUPPLIERS = [
   'Divya',
   'Inah Co Ltd - 9k CZ Huggies',
   'Forval',
-  'Lotus',
   'D.N. Jewels',
   'DAUB A.D',
 ];

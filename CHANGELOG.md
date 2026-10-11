@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12
+
+### Changed
+- Lotus no longer a current supplier, so its stock can be a This Week Specials pick.
+
 ## 2026-10-09
 
 ### Added
