@@ -139,6 +139,33 @@ const ALL_PRODUCT_MEDIA = /* GraphQL */ `
   }
 `;
 
+/**
+ * Every product's sync state and media count, for the nightly drift sweep. No
+ * media nodes: the sweep only needs to know what the state records, which keeps
+ * the whole store to ~27 cheap pages instead of the duplicate scan's heavy sweep.
+ */
+const ALL_PRODUCT_STATES = /* GraphQL */ `
+  query AllProductStates($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      nodes {
+        id
+        mediaCount {
+          count
+        }
+        metafield(namespace: "${STATE_METAFIELD.NAMESPACE}", key: "${STATE_METAFIELD.KEY}") {
+          id
+          value
+          type
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
 const ADD_MEDIA = /* GraphQL */ `
   mutation AddMedia($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
     productUpdate(product: $product, media: $media) {
@@ -493,6 +520,49 @@ export function createShopifyClient(config, log = console) {
   }
 
   /**
+   * Every product's state metafield and media count, keyed by product id. Throws
+   * rather than returning a partial map: the drift sweep reads a missing product
+   * as "no state", which would make it re-sync products that are fine.
+   *
+   * @returns {Promise<Map<string, { stateMetafield: object | null, mediaCount: number }>>}
+   */
+  async function listProductStates({
+    pageSize = SHOPIFY_BULK_PAGE_SIZE,
+    maxPages = SHOPIFY_BULK_MAX_PAGES,
+  } = {}) {
+    const states = new Map();
+    let after = null;
+
+    for (let pages = 1; ; pages += 1) {
+      const data = await graphql(
+        ALL_PRODUCT_STATES,
+        { first: pageSize, after },
+        { label: 'listProductStates' },
+      );
+
+      const connection = data?.products;
+      for (const node of connection?.nodes ?? []) {
+        states.set(node.id, {
+          stateMetafield: node.metafield ?? null,
+          mediaCount: node.mediaCount?.count ?? 0,
+        });
+      }
+
+      if (!connection?.pageInfo?.hasNextPage) break;
+      if (pages >= maxPages) {
+        throw new Error(
+          `listProductStates: stopped at ${pages} pages (${states.size} products), ` +
+            'raise SHOPIFY_BULK_MAX_PAGES.',
+        );
+      }
+      after = connection.pageInfo.endCursor;
+    }
+
+    log.info?.(`listProductStates: ${states.size} product(s)`);
+    return states;
+  }
+
+  /**
    * @param {string} productId
    * @returns {Promise<{ id: string, title: string, media: object[], stateMetafield: object | null }>}
    */
@@ -703,6 +773,7 @@ export function createShopifyClient(config, log = console) {
     findProductsBySku,
     listAllVariantSkus,
     iterateProductsWithMedia,
+    listProductStates,
     getProduct,
     appendImage,
     detachMedia,

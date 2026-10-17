@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-16
+
+### Added
+- `imageDriftSweep` nightly timer: syncs products whose Unleashed images never reached Shopify, independent of `LastModifiedOn`.
+- `sync-cli.js --drift [--apply]`.
+- Warning log with field names when a webhook delivery has no readable event type.
+
+### Fixed
+- Webhook reads `EventType`/`Data` as well as `eventType`/`data`; every delivery had been ignored as `undefined`.
+
 ## 2026-10-12
 
 ### Changed

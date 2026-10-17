@@ -37,6 +37,7 @@ const { reconcile, syncByProductCode, lookbackSince } = await import('../src/uti
 const { auditCatalogue } = await import('../src/utils/audit.js');
 const { auditDuplicates } = await import('../src/utils/duplicates.js');
 const { auditMissingImages } = await import('../src/utils/missingImages.js');
+const { sweepImageDrift } = await import('../src/utils/imageDrift.js');
 const {
   buildAuditCsv,
   buildAuditSummary,
@@ -47,7 +48,7 @@ const {
 } = await import('../src/utils/report.js');
 
 function parseArgs(argv) {
-  const args = { dryRun: false, all: false, audit: false, duplicates: false, missingImages: false, apply: false };
+  const args = { dryRun: false, all: false, audit: false, duplicates: false, missingImages: false, drift: false, apply: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') args.dryRun = true;
@@ -55,6 +56,7 @@ function parseArgs(argv) {
     else if (arg === '--audit') args.audit = true;
     else if (arg === '--duplicates') args.duplicates = true;
     else if (arg === '--missing-images') args.missingImages = true;
+    else if (arg === '--drift') args.drift = true;
     else if (arg === '--apply') args.apply = true;
     else if (arg === '--csv') args.csv = argv[++i];
     else if (arg === '--sku') args.sku = argv[++i];
@@ -73,7 +75,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 
-if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.duplicates && !args.missingImages)) {
+if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.duplicates && !args.missingImages && !args.drift)) {
   console.log(
     [
       'Usage:',
@@ -95,6 +97,10 @@ if (args.help || (!args.sku && !args.since && !args.all && !args.audit && !args.
       'copy this sync uploaded, keeping the one that was already there:',
       '  node scripts/sync-cli.js --duplicates [--csv reports/duplicates.csv]',
       '  node scripts/sync-cli.js --duplicates --apply',
+      '',
+      'Image drift — Unleashed images the website never received, whatever their',
+      'LastModifiedOn says. Read-only unless --apply, which syncs each one:',
+      '  node scripts/sync-cli.js --drift [--apply]',
     ].join('\n'),
   );
   process.exit(args.help ? 0 : 1);
@@ -141,6 +147,12 @@ if (args.audit) {
     console.log(
       `Nothing was changed. Re-run with --apply to detach ${audit.repairable} duplicate(s).`,
     );
+  }
+} else if (args.drift) {
+  const report = await sweepImageDrift({ unleashed, shopify, config, log, apply: args.apply });
+  console.log(JSON.stringify(report, null, 2));
+  if (!args.apply && report.drifted > 0) {
+    console.log(`Nothing was changed. Re-run with --apply to sync ${report.drifted} product(s).`);
   }
 } else if (args.sku) {
   const result = await syncByProductCode({

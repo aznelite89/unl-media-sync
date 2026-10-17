@@ -89,6 +89,12 @@ import {
 } from '../src/utils/weeklySpecialsPlan.js';
 import { syncWeeklySpecials } from '../src/utils/weeklySpecials.js';
 import { buildWeeklySpecialsCsv, buildWeeklySpecialsSummary } from '../src/utils/report.js';
+import { findImageDrift, sweepImageDrift } from '../src/utils/imageDrift.js';
+import {
+  describeWebhookShape,
+  readWebhookEventType,
+  readWebhookProductGuid,
+} from '../src/utils/unleashed.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -3257,6 +3263,152 @@ test('the specials email lists the picks and warns on a short category', () => {
   assert.ok(summary.text.includes('priced over $80'));
   assert.ok(summary.text.includes('$129.50'));
   assert.ok(buildWeeklySpecialsCsv(report).includes('Rings,9KX1,"Ring, gold",129.5,Hem,before Mar 2024,no sale on record'));
+});
+
+// Image drift: attachments added in Unleashed without LastModifiedOn moving (9KC597).
+const driftUrl = (name) => `https://unlappcdn.unleashedsoftware.com/037a/${name}/${name}.png`;
+const driftState = (entries) => ({
+  stateMetafield: { value: JSON.stringify({ version: 1, managed: entries }) },
+  mediaCount: entries.length,
+});
+const driftEntry = (name, productCode) => ({
+  url: driftUrl(name), mediaId: `gid://shopify/MediaImage/${name}`, origin: 'synced', productCode,
+});
+const driftInput = (overrides = {}) => ({
+  products: [{
+    ProductCode: '9KC597',
+    Obsolete: false,
+    Images: [{ Url: driftUrl('front'), IsDefault: true }, { Url: driftUrl('back'), IsDefault: false }],
+  }],
+  skus: new Map([['9kc597', { productId: 'gid://shopify/Product/1', productCount: 1 }]]),
+  states: new Map([['gid://shopify/Product/1', driftState([driftEntry('front', '9KC597')])]]),
+  maxSyncedImages: 5,
+  maxMediaPerProduct: 5,
+  deleteRemovedMedia: true,
+  ...overrides,
+});
+
+test('drift: an attached image missing from state is found', () => {
+  const drift = findImageDrift(driftInput());
+  assert.equal(drift.length, 1);
+  assert.equal(drift[0].productCode, '9KC597');
+  assert.equal(drift[0].missing, 1);
+  assert.equal(drift[0].stale, 0);
+});
+
+test('drift: a product whose images are all in state is left alone', () => {
+  const states = new Map([['gid://shopify/Product/1',
+    driftState([driftEntry('front', '9KC597'), driftEntry('back', '9KC597')])]]);
+  assert.deepEqual(findImageDrift(driftInput({ states })), []);
+});
+
+test('drift: a sibling code\'s entry for the same file counts as tracked', () => {
+  const states = new Map([['gid://shopify/Product/1',
+    driftState([driftEntry('front', '9KC597'), driftEntry('back', '9KC597-2')])]]);
+  assert.deepEqual(findImageDrift(driftInput({ states })), []);
+});
+
+test('drift: a replaced image is stale only when deletion is on', () => {
+  const states = new Map([['gid://shopify/Product/1',
+    driftState([driftEntry('front', '9KC597'), driftEntry('back', '9KC597'), driftEntry('old', '9KC597')])]]);
+  assert.equal(findImageDrift(driftInput({ states }))[0].stale, 1);
+  assert.deepEqual(findImageDrift(driftInput({ states, deleteRemovedMedia: false })), []);
+});
+
+test('drift: a sibling\'s stale-looking entry is never counted against this code', () => {
+  const states = new Map([['gid://shopify/Product/1',
+    driftState([driftEntry('front', '9KC597'), driftEntry('back', '9KC597'), driftEntry('other', '9KC597-2')])]]);
+  assert.deepEqual(findImageDrift(driftInput({ states })), []);
+});
+
+test('drift: obsolete, image-less, unmatched and ambiguous products are skipped', () => {
+  const base = driftInput();
+  assert.deepEqual(findImageDrift({ ...base, products: [{ ...base.products[0], Obsolete: true }] }), []);
+  assert.deepEqual(findImageDrift({ ...base, products: [{ ...base.products[0], Images: [] }] }), []);
+  assert.deepEqual(findImageDrift({ ...base, skus: new Map() }), []);
+  assert.deepEqual(findImageDrift({
+    ...base,
+    skus: new Map([['9kc597', { productId: 'gid://shopify/Product/1', productCount: 2 }]]),
+  }), []);
+});
+
+test('drift: a capped page with nothing to free a slot is skipped, not retried nightly', () => {
+  const capped = { ...driftState([driftEntry('front', '9KC597')]), mediaCount: 5 };
+  const states = new Map([['gid://shopify/Product/1', capped]]);
+  assert.deepEqual(findImageDrift(driftInput({ states })), []);
+});
+
+function driftClients(products, synced) {
+  return {
+    unleashed: {
+      async *iterateProducts() { yield { items: products, pageNumber: 1, totalPages: 1 }; },
+    },
+    shopify: {
+      async listAllVariantSkus() {
+        return new Map(products.map((p, i) =>
+          [p.ProductCode.toLowerCase(), { productId: `gid://shopify/Product/${i}`, productCount: 1 }]));
+      },
+      async listProductStates() {
+        return new Map(products.map((p, i) => [`gid://shopify/Product/${i}`, driftState([])]));
+      },
+      async findProductsBySku(code) {
+        synced.push(code);
+        throw new Error('stop here: the sweep reached the sync');
+      },
+    },
+  };
+}
+
+const driftProducts = (count) => Array.from({ length: count }, (_, i) => ({
+  ProductCode: `9KD${i}`, Obsolete: false, Images: [{ Url: driftUrl(`d${i}`), IsDefault: true }],
+}));
+const quietLog = { info() {}, warn() {}, error() {} };
+const driftConfig = { maxSyncedImages: 5, maxMediaPerProduct: 5, deleteRemovedMedia: true, dryRun: true };
+
+test('drift sweep: read-only without apply, never reaching the sync', async () => {
+  const synced = [];
+  const report = await sweepImageDrift({
+    ...driftClients(driftProducts(3), synced), config: driftConfig, log: quietLog, apply: false,
+  });
+  assert.equal(report.drifted, 3);
+  assert.deepEqual(synced, []);
+  assert.ok(report.results.every((r) => r.outcome === null));
+});
+
+test('drift sweep: applies up to the cap, defers the rest, and records a failure per product', async () => {
+  const synced = [];
+  const report = await sweepImageDrift({
+    ...driftClients(driftProducts(4), synced), config: driftConfig, log: quietLog, apply: true, maxSyncs: 2,
+  });
+  assert.equal(report.results.length, 2);
+  assert.equal(report.deferred, 2);
+  assert.ok(report.results.every((r) => r.outcome === SYNC_OUTCOME.FAILED));
+});
+
+test('drift sweep: stops syncing once the time budget is spent', async () => {
+  const synced = [];
+  let clock = 0;
+  const report = await sweepImageDrift({
+    ...driftClients(driftProducts(3), synced), config: driftConfig, log: quietLog, apply: true,
+    budgetMs: 10, nowMs: () => { clock += 6; return clock; },
+  });
+  assert.equal(report.results.length, 1);
+  assert.equal(report.deferred, 2);
+});
+
+test('webhook: event type and guid are read in either casing', () => {
+  assert.equal(readWebhookEventType({ eventType: 'product.updated' }), 'product.updated');
+  assert.equal(readWebhookEventType({ EventType: 'product.updated' }), 'product.updated');
+  assert.equal(readWebhookEventType({ event: 'x' }), null);
+  assert.equal(readWebhookProductGuid({ Data: '{"productGuid":"abc"}' }), 'abc');
+  assert.equal(readWebhookProductGuid({ data: { ProductGuid: 'abc' } }), 'abc');
+});
+
+test('webhook: an unreadable delivery is described by field names only', () => {
+  assert.equal(describeWebhookShape({ Foo: 'secret', Bar: 1 }), 'object with keys [Foo, Bar]');
+  assert.equal(describeWebhookShape([{}, {}]), 'array of 2');
+  assert.equal(describeWebhookShape('text'), 'string');
+  assert.equal(describeWebhookShape(null), 'null');
 });
 
 let failures = 0;

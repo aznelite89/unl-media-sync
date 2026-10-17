@@ -248,6 +248,19 @@ export const SHOPIFY_BULK_PAGE_SIZE = 250;
 /** ~25k variants before the audit would under-report; the store is far below that. */
 export const SHOPIFY_BULK_MAX_PAGES = 100;
 
+/**
+ * Nightly image drift sweep. Adding or replacing an attachment in Unleashed does
+ * not move the product's LastModifiedOn, so the 10-minute reconcile never sees it
+ * (9KC597, Oct 2026: second image attached, LastModifiedOn still 11 Aug). The
+ * sweep compares the whole catalogue against the state metafield instead.
+ *
+ * Syncs per run are capped so a sudden mass drift cannot outrun the 10-minute
+ * function timeout; what the cap leaves is picked up the next night. The budget
+ * leaves room after the ~3-minute Unleashed catalogue read.
+ */
+export const IMAGE_DRIFT_MAX_SYNCS = 50;
+export const IMAGE_DRIFT_BUDGET_MS = 8 * 60_000;
+
 /** Unmatched SKUs listed inline in the weekly email; the rest ride in the CSV. */
 export const AUDIT_INLINE_LIMIT = 40;
 

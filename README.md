@@ -88,6 +88,39 @@ Because a sibling's copy can now be claimed, **one media item can be referenced 
 codes' state entries**. Removal accounts for that: a code that drops an image never detaches media
 another code still points at, or the photograph would vanish for every variant still using it.
 
+### Images Unleashed never reports
+
+Adding or replacing an image attachment in Unleashed does **not** move the product's
+`LastModifiedOn`. The 10-minute reconcile only asks for products modified in its window, so it never
+sees the change. **9KC597** had a second image attached on 14 Oct 2026 while `LastModifiedOn` still
+read 11 Aug, and the website kept showing one image. A catalogue-wide check that day found six more
+the same way, two of them replaced photos still showing the old picture.
+
+The webhook was no help either: from at least 16 Aug to 16 Oct 2026 every delivery was logged as
+`webhook: ignoring undefined`. Unleashed's docs show `eventType`, but the live API uses PascalCase
+elsewhere (its own subscription listing returns `EventTypes`), so the handler now reads both. A
+delivery with no readable event type logs a warning with its field names, never its values, so the
+next mismatch shows up in a day, not two months. Whether Unleashed sends `product.updated` for an
+attachment at all is unconfirmed, so the sweep below does not rely on it.
+
+`imageDriftSweep` runs nightly at 03:00 AEST. It reads the whole Unleashed catalogue, every SKU and
+every product's `custom.unleashed_media` state, and syncs a product when:
+
+- an image Unleashed lists (default first, capped at `MAX_SYNCED_IMAGES`) is in no state entry on
+  its Shopify product, from any sibling code; or
+- with `DELETE_REMOVED_MEDIA` on, an entry this code owns points at an image Unleashed dropped.
+
+It goes through the ordinary sync, so every guard above still applies and `DRY_RUN` is honoured.
+Skipped: obsolete, image-less (the last-image path handles those), unmatched and ambiguous codes,
+and pages already at `MAX_MEDIA_PER_PRODUCT` with nothing of this code's to free a slot. At most
+`IMAGE_DRIFT_MAX_SYNCS` (50) syncs per run inside an 8-minute budget; the rest wait a night. Each
+drifted product is logged as a warning, because it means the webhook and reconcile both missed it.
+
+```bash
+node scripts/sync-cli.js --drift            # read-only list
+node scripts/sync-cli.js --drift --apply    # sync each one
+```
+
 ### The last image
 
 Deleting the *last* image a product has is a different problem from deleting one of several.
@@ -339,7 +372,7 @@ az functionapp config appsettings set -g $RG -n $APP \
   --settings "WEBSITE_RUN_FROM_PACKAGE=https://$STORAGE.blob.core.windows.net/function-releases/$NAME?$SAS"
 ```
 
-Confirm it took: `az functionapp function list -g $RG -n $APP --query "length(@)"` must report **7**,
+Confirm it took: `az functionapp function list -g $RG -n $APP --query "length(@)"` must report **11**,
 and Application Insights should show the next `reconcileMedia` run within 10 minutes.
 
 Secrets belong in app settings (or Key Vault references) — never in the repo, and never in
@@ -368,6 +401,7 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `weeklyMissingImages` | timer, Sun 23:30 UTC (Mon 09:30 AEST) | emails the office the products created in Unleashed in the last 12 months that have no image ([Products without images](#products-without-images)) |
 | `customerUpkeep` | timer, every 15 min | undoes what the Shopify connector does to Unleashed customers on a website order: puts back wiped Notes ([Customer notes guard](#customer-notes-guard), `GUARD_CUSTOMER_NOTES`), then copies City into an empty Suburb ([Customer suburb fill](#customer-suburb-fill), `FILL_CUSTOMER_SUBURB`). Each part is a no-op until its setting is `true` |
 | `newArrivals` | timer, 18:15 UTC (04:15 AEST) | keeps the New Arrivals collection to products created in Unleashed in the last six months ([New Arrivals](#new-arrivals), `SYNC_NEW_ARRIVALS`). No-op until the setting is `true` |
+| `imageDriftSweep` | timer, 17:00 UTC (03:00 AEST) | syncs every product whose Unleashed images differ from what Shopify received, whatever `LastModifiedOn` says ([Images Unleashed never reports](#images-unleashed-never-reports)) |
 | `weeklySpecials` | timer, Sun 18:30 UTC (Mon 04:30 AEST) | picks This Week Specials, 12 per category, and emails the office ([This Week Specials](#this-week-specials), `SYNC_WEEKLY_SPECIALS`). No-op until the setting is `true` |
 
 ### New Arrivals

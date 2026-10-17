@@ -435,13 +435,40 @@ export function createUnleashedClient(config, log = console) {
 }
 
 /**
+ * The event name from a webhook envelope. Unleashed's docs show camelCase
+ * (`eventType`), but the live API serialises PascalCase everywhere else (its
+ * subscription listing returns `EventTypes`), and every delivery from August to
+ * October 2026 was dropped as `undefined` while only `eventType` was read.
+ *
+ * @param {object} envelope
+ * @returns {string | null}
+ */
+export function readWebhookEventType(envelope) {
+  return envelope?.eventType ?? envelope?.EventType ?? null;
+}
+
+/**
+ * What a delivery looked like, without any values, for the log line written when
+ * no event type can be read. Field names only: enough to fix the parser, nothing
+ * that belongs to a customer.
+ *
+ * @param {unknown} envelope
+ */
+export function describeWebhookShape(envelope) {
+  if (Array.isArray(envelope)) return `array of ${envelope.length}`;
+  if (envelope === null) return 'null';
+  if (typeof envelope !== 'object') return typeof envelope;
+  return `object with keys [${Object.keys(envelope).join(', ')}]`;
+}
+
+/**
  * Pulls the product identifier out of a webhook envelope. `data` arrives as a
  * JSON-encoded string in some deliveries and as an object in others.
  *
  * @param {object} envelope
  */
 export function readWebhookProductGuid(envelope) {
-  let data = envelope?.data;
+  let data = envelope?.data ?? envelope?.Data;
   if (typeof data === 'string') {
     try {
       data = JSON.parse(data);

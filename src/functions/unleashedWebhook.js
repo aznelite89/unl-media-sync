@@ -11,6 +11,8 @@ import { syncByGuid } from '../utils/reconcile.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import {
   createUnleashedClient,
+  describeWebhookShape,
+  readWebhookEventType,
   readWebhookProductGuid,
   verifyWebhook,
 } from '../utils/unleashed.js';
@@ -55,7 +57,13 @@ async function handler(request, context) {
     return { status: HTTP_STATUS.BAD_REQUEST, jsonBody: { error: 'body is not JSON' } };
   }
 
-  const eventType = envelope?.eventType;
+  const eventType = readWebhookEventType(envelope);
+  if (eventType === null) {
+    // Acknowledged so Unleashed does not retry, but loudly: a parser that cannot
+    // read the envelope drops every delivery, which went unseen for two months.
+    log.warn(`webhook: no event type in delivery, ${describeWebhookShape(envelope)}`);
+    return { status: HTTP_STATUS.OK, jsonBody: { ignored: null } };
+  }
   if (!SUBSCRIBED_EVENTS.includes(eventType)) {
     // Acknowledge so Unleashed does not retry an event we deliberately ignore.
     log.info(`webhook: ignoring ${eventType}`);
