@@ -22,6 +22,8 @@ import {
   ORDER_SYNC_DONE_OUTCOMES,
   ORDER_SYNC_OUTCOME,
   ORDER_SYNC_PROBLEM_OUTCOMES,
+  SHADOW_VERDICT,
+  SHOPIFY_ORDER_CREATOR,
 } from '../constants/index.js';
 import { sendEmail, escapeHtml } from './email.js';
 import { summarise } from './logger.js';
@@ -282,6 +284,104 @@ export async function sendProblemEmail({ results, config, log }) {
   return sendEmail({ config, subject, text, html, log });
 }
 
+/** One comparable string per Unleashed line. */
+export function lineKey(line) {
+  const code = line?.Product?.ProductCode ?? '';
+  return `${code} x${Number(line.OrderQuantity)} @${Number(line.UnitPrice).toFixed(2)} -${Number(line.DiscountRate ?? 0)}`;
+}
+
+/**
+ * Our plan against the hub's order for the same website order. Lines are
+ * compared as multisets: the hub orders them as Shopify does, and so do we,
+ * but order is not what matters.
+ *
+ * @param {{ result: object, hubOrder: object | null }} input
+ */
+export function compareWithHub({ result, hubOrder }) {
+  if (!hubOrder) return null;
+  const hub = {
+    customerCode: hubOrder.Customer?.CustomerCode ?? null,
+    status: hubOrder.OrderStatus,
+    createdBy: hubOrder.CreatedBy,
+    lastModifiedBy: hubOrder.LastModifiedBy,
+    lines: (hubOrder.SalesOrderLines ?? []).map(lineKey),
+    total: hubOrder.Total,
+  };
+  if (!result.body) {
+    return { verdict: SHADOW_VERDICT.NOT_PLANNED, hub, reason: result.reason ?? result.outcome, customerAgrees: null, diffs: [] };
+  }
+  const ours = result.body.SalesOrderLines.map(lineKey);
+  const customerAgrees = result.customerCode === hub.customerCode;
+  const edited = hub.lastModifiedBy !== SHOPIFY_ORDER_CREATOR;
+
+  const remaining = [...hub.lines];
+  const onlyOurs = [];
+  for (const key of ours) {
+    const at = remaining.indexOf(key);
+    if (at === -1) onlyOurs.push(key);
+    else remaining.splice(at, 1);
+  }
+  const diffs = [
+    ...onlyOurs.map((key) => `ours only: ${key}`),
+    ...remaining.map((key) => `hub only: ${key}`),
+  ];
+  if (!customerAgrees) diffs.unshift(`customer: ours ${result.customerCode}, hub ${hub.customerCode}`);
+
+  let verdict = SHADOW_VERDICT.SAME;
+  if (diffs.length) verdict = edited ? SHADOW_VERDICT.EDITED : SHADOW_VERDICT.DIFFERENT;
+  if (!customerAgrees) verdict = SHADOW_VERDICT.DIFFERENT;
+  return { verdict, hub, ours, customerAgrees, edited, diffs };
+}
+
+/**
+ * Shadow pass: for every website order in the window that has not been
+ * compared yet and that the hub has already created, plan ours, compare, and
+ * record the verdict. Nothing is written to Unleashed. An order the hub has
+ * not created yet is left for the next run.
+ */
+export async function shadowOrders({ shopify, unleashed, store, config, log, sinceIso }) {
+  const since = sinceIso ?? lookbackIso(config.orderSync.lookbackHours);
+  const { state, etag } = await store.load();
+  const nodes = await shopify.listOrdersCreatedSince(since);
+  const nowIso = new Date().toISOString();
+  const results = [];
+
+  for (const node of nodes) {
+    const previous = state.orders[node.id];
+    if (previous && ORDER_SYNC_DONE_OUTCOMES.includes(previous.outcome)) continue;
+
+    const orderNumber = `${config.orderSync.prefix}${node.name}`;
+    const hubOrder = await unleashed.findSalesOrderByNumber(orderNumber);
+    if (!hubOrder) {
+      results.push({ id: node.id, name: node.name, orderNumber, outcome: ORDER_SYNC_OUTCOME.PLANNED, reason: 'hub has not created it yet; next run' });
+      continue;
+    }
+    const planned = await importOrder({ orderNode: node, unleashed, config, log, apply: false, ignoreExisting: true });
+    const comparison = compareWithHub({ result: planned, hubOrder });
+    const result = { ...planned, outcome: ORDER_SYNC_OUTCOME.SHADOW, plannedOutcome: planned.outcome, comparison };
+    results.push(result);
+    state.orders[node.id] = toStateEntry(result, nowIso);
+  }
+
+  state.lastRunAt = nowIso;
+  try {
+    await store.save(state, etag);
+  } catch (error) {
+    log.warn?.(`shadow: state not saved — ${error.message}`);
+  }
+  const byVerdict = {};
+  for (const r of results) if (r.comparison) byVerdict[r.comparison.verdict] = (byVerdict[r.comparison.verdict] ?? 0) + 1;
+  return { since, scanned: nodes.length, results, byVerdict };
+}
+
+/** The shadow verdicts recorded so far, for the CLI. */
+export function summariseShadow(state) {
+  const entries = Object.values(state.orders ?? {}).filter((e) => e.outcome === ORDER_SYNC_OUTCOME.SHADOW);
+  const byVerdict = {};
+  for (const e of entries) byVerdict[e.comparison?.verdict ?? 'unknown'] = (byVerdict[e.comparison?.verdict ?? 'unknown'] ?? 0) + 1;
+  return { count: entries.length, byVerdict, entries: entries.sort((a, b) => (a.name > b.name ? 1 : -1)) };
+}
+
 /** Multi-line description of one result for logs and the CLI. */
 export function describeResult(result) {
   const head =
@@ -292,6 +392,12 @@ export function describeResult(result) {
     (result.reason ? ` — ${result.reason}` : '');
   const lines = [head];
   for (const warning of result.warnings ?? []) lines.push(`  ! ${warning}`);
-  if (result.body) lines.push(...describeLines(result.body).map((line) => `  ${line}`));
+  if (result.comparison) {
+    const c = result.comparison;
+    lines.push(`  shadow: ${c.verdict}${c.customerAgrees === false ? ' (customer differs)' : ''}${c.edited ? ` (hub order edited by ${c.hub.lastModifiedBy})` : ''}`);
+    for (const diff of c.diffs) lines.push(`    ${diff}`);
+  } else if (result.body) {
+    lines.push(...describeLines(result.body).map((line) => `  ${line}`));
+  }
   return lines.join('\n');
 }

@@ -2,7 +2,7 @@ import { app } from '@azure/functions';
 
 import { loadConfig } from '../utils/config.js';
 import { toLog } from '../utils/logger.js';
-import { describeResult, syncOrders } from '../utils/orderSync.js';
+import { describeResult, shadowOrders, syncOrders } from '../utils/orderSync.js';
 import { createBlobOrderStore } from '../utils/orderSyncStore.js';
 import { createShopifyClient } from '../utils/shopify.js';
 import { createUnleashedClient } from '../utils/unleashed.js';
@@ -12,7 +12,8 @@ import { createUnleashedClient } from '../utils/unleashed.js';
  * from the last ORDER_SYNC_LOOKBACK_HOURS that is not yet in Unleashed is
  * created, and held orders (customer not identified, SKU missing) are retried
  * so that mapping a customer in Shopify admin is all the office has to do.
- * Gated by SYNC_SHOPIFY_ORDERS; DRY_RUN=true reports only.
+ * Gated by SYNC_SHOPIFY_ORDERS; ORDER_SYNC_SHADOW=true compares with the hub's
+ * orders instead of creating any; DRY_RUN=true reports only.
  */
 async function handler(timer, context) {
   const log = toLog(context);
@@ -26,6 +27,13 @@ async function handler(timer, context) {
   const shopify = createShopifyClient(config, log);
   const unleashed = createUnleashedClient(config, log);
   const store = createBlobOrderStore(config.orderSyncStorageConnection);
+
+  if (config.orderSync.shadow) {
+    const report = await shadowOrders({ shopify, unleashed, store, config, log });
+    log.info(`order sync SHADOW: ${report.scanned} orders since ${report.since}, verdicts ${JSON.stringify(report.byVerdict)}`);
+    for (const result of report.results) log.info(`order sync SHADOW: ${describeResult(result)}`);
+    return;
+  }
 
   const report = await syncOrders({ shopify, unleashed, store, config, log, apply: !config.dryRun });
   log.info(

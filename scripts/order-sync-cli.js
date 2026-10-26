@@ -13,6 +13,8 @@
  *                                                                    # map every Shopify customer from past web orders
  *   node scripts/order-sync-cli.js --ensure-definition [--apply]     # show the code field on Shopify customer pages
  *   node scripts/order-sync-cli.js --state                           # what the timer has recorded
+ *   node scripts/order-sync-cli.js --shadow 72h                      # compare our plan with the hub's orders (writes only our state)
+ *   node scripts/order-sync-cli.js --shadow-report                   # every shadow verdict recorded so far
  *
  * The state lives in the Function App's storage account. Point at it with
  *   export ORDER_SYNC_STORAGE_CONNECTION="$(az storage account show-connection-string \
@@ -44,7 +46,7 @@ const { loadConfig } = await import('../src/utils/config.js');
 const { createUnleashedClient } = await import('../src/utils/unleashed.js');
 const { createShopifyClient } = await import('../src/utils/shopify.js');
 const { createBlobOrderStore, createMemoryOrderStore } = await import('../src/utils/orderSyncStore.js');
-const { describeResult, importOrder, lookbackIso, syncOrders } = await import('../src/utils/orderSync.js');
+const { describeResult, importOrder, lookbackIso, shadowOrders, summariseShadow, syncOrders } = await import('../src/utils/orderSync.js');
 const { ORDER_SYNC_OUTCOME, SHOPIFY_ORDER_CREATOR } = await import('../src/constants/index.js');
 
 function parseArgs(argv) {
@@ -61,6 +63,8 @@ function parseArgs(argv) {
     else if (arg === '--seed-mapping') args.seedMapping = true;
     else if (arg === '--ensure-definition') args.ensureDefinition = true;
     else if (arg === '--state') args.state = true;
+    else if (arg === '--shadow') args.shadow = argv[++i];
+    else if (arg === '--shadow-report') args.shadowReport = true;
     else if (arg === '--csv') args.csv = argv[++i];
     else if (arg === '--json') args.json = true;
     else if (arg === '--help' || arg === '-h') args.help = true;
@@ -73,7 +77,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-if (args.help || (!args.order && !args.since && !args.fromFile && !args.map && !args.seedMapping && !args.ensureDefinition && !args.state && !args.compare)) {
+if (args.help || (!args.order && !args.since && !args.fromFile && !args.map && !args.seedMapping && !args.ensureDefinition && !args.state && !args.compare && !args.shadow && !args.shadowReport)) {
   console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).join('\n'));
   process.exit(args.help ? 0 : 1);
 }
@@ -229,6 +233,22 @@ try {
     else console.log('Dry run; pass --apply to write it.');
   } else if (args.seedMapping) {
     await seedMapping();
+  } else if (args.shadow) {
+    const store = config.orderSyncStorageConnection && !config.orderSyncStorageConnection.includes('UseDevelopmentStorage')
+      ? createBlobOrderStore(config.orderSyncStorageConnection)
+      : createMemoryOrderStore();
+    const report = await shadowOrders({ shopify, unleashed, store, config, log, sinceIso: parseSince(args.shadow) });
+    for (const result of report.results) { console.log(describeResult(result)); console.log(''); }
+    console.log(`${report.scanned} orders since ${report.since}; verdicts ${JSON.stringify(report.byVerdict)}`);
+  } else if (args.shadowReport) {
+    const store = createBlobOrderStore(config.orderSyncStorageConnection);
+    const { state } = await store.load();
+    const summary = summariseShadow(state);
+    for (const e of summary.entries) {
+      console.log(`${e.name.padEnd(7)} ${e.comparison?.verdict ?? '?'}  ours ${e.customerCode ?? '-'} hub ${e.comparison?.hub?.customerCode ?? '-'}${e.comparison?.edited ? ` (edited by ${e.comparison.hub.lastModifiedBy})` : ''}${e.reason ? ` — ${e.reason}` : ''}`);
+      for (const d of e.comparison?.diffs ?? []) console.log(`        ${d}`);
+    }
+    console.log(`${summary.count} orders compared; ${JSON.stringify(summary.byVerdict)}`);
   } else if (args.state) {
     const store = createBlobOrderStore(config.orderSyncStorageConnection);
     const { state } = await store.load();

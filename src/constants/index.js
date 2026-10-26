@@ -873,6 +873,20 @@ export const ORDER_SYNC_OUTCOME = {
   SKIPPED: 'skipped',
   /** Unleashed rejected the order or a request failed. */
   FAILED: 'failed',
+  /** Shadow run: planned and compared with the hub's order, nothing written. */
+  SHADOW: 'shadow',
+};
+
+/** How a shadow comparison came out. */
+export const SHADOW_VERDICT = {
+  /** Same customer and the same lines as the hub's untouched order. */
+  SAME: 'same',
+  /** The hub's order was edited by a person after import, so lines cannot be compared. */
+  EDITED: 'edited',
+  /** A real difference against the hub's untouched order. */
+  DIFFERENT: 'different',
+  /** We could not plan the order (customer not identified, SKU missing). */
+  NOT_PLANNED: 'not-planned',
 };
 
 /** Outcomes that are final: the timer does not look at the order again. */
@@ -880,6 +894,7 @@ export const ORDER_SYNC_DONE_OUTCOMES = [
   ORDER_SYNC_OUTCOME.CREATED,
   ORDER_SYNC_OUTCOME.EXISTS,
   ORDER_SYNC_OUTCOME.SKIPPED,
+  ORDER_SYNC_OUTCOME.SHADOW,
 ];
 
 /** Outcomes the office is told about, once per order. */

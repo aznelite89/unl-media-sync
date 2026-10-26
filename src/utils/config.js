@@ -188,6 +188,13 @@ export function loadConfig(options = {}) {
       currencyCode: process.env.ORDER_SYNC_CURRENCY || DEFAULT_ORDER_SYNC_CURRENCY,
       timeZone: process.env.ORDER_SYNC_TIMEZONE || DEFAULT_ORDER_SYNC_TIMEZONE,
       lookbackHours: readInt(process.env.ORDER_SYNC_LOOKBACK_HOURS, DEFAULT_ORDER_SYNC_LOOKBACK_HOURS),
+      /**
+       * Shadow run: the hub still creates the orders; this service plans each
+       * one, compares it with the hub's order line by line and records the
+       * verdict, writing nothing to Unleashed. Only the order sync is affected,
+       * unlike DRY_RUN, which is app-wide.
+       */
+      shadow: readBool(process.env.ORDER_SYNC_SHADOW, false),
     },
     /** Where the order sync state lives; the Function App's own storage unless set. */
     orderSyncStorageConnection:

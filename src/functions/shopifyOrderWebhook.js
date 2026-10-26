@@ -69,6 +69,10 @@ async function handler(request, context) {
   const orderId = payload?.admin_graphql_api_id ?? (payload?.id ? `gid://shopify/Order/${payload.id}` : null);
   if (!orderId) return { status: HTTP_STATUS.BAD_REQUEST, jsonBody: { error: 'no order id in payload' } };
 
+  if (config.orderSync.shadow) {
+    log.info(`order webhook: shadow run; ${payload?.name ?? orderId} left to the timer to compare`);
+    return { status: HTTP_STATUS.OK, jsonBody: { ignored: 'shadow' } };
+  }
   if (!config.syncShopifyOrders) {
     log.info(`order webhook: SYNC_SHOPIFY_ORDERS is off; ${payload?.name ?? orderId} acknowledged, not imported`);
     return { status: HTTP_STATUS.OK, jsonBody: { ignored: 'sync off' } };
