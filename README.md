@@ -399,6 +399,8 @@ Copy the returned `signatureKey` — **shown once** — into the app setting
 | `weeklyAudit` | timer, Sun 22:30 UTC (Mon 08:30 AEST) | whole-catalogue audit: products whose images can never reach the site |
 | `weeklyDuplicateAudit` | timer, Sun 23:00 UTC (Mon 09:00 AEST) | whole-store duplicate census: the same picture on one product twice |
 | `weeklyMissingImages` | timer, Sun 23:30 UTC (Mon 09:30 AEST) | emails the office the products created in Unleashed in the last 12 months that have no image ([Products without images](#products-without-images)) |
+| `shopifyOrderWebhook` | `POST /api/shopify/order-webhook` (anonymous, HMAC-verified with `SHOPIFY_WEBHOOK_SECRET`) | creates the Unleashed sales order for a new website order ([Website orders](#website-orders-shopify--unleashed), `SYNC_SHOPIFY_ORDERS`) |
+| `orderSync` | timer, every 5 min | catch-up for the order webhook: any website order from the last `ORDER_SYNC_LOOKBACK_HOURS` not yet in Unleashed is created; held orders are retried. No-op until the setting is `true` |
 | `customerUpkeep` | timer, every 15 min | undoes what the Shopify connector does to Unleashed customers on a website order: puts back wiped Notes ([Customer notes guard](#customer-notes-guard), `GUARD_CUSTOMER_NOTES`), then copies City into an empty Suburb ([Customer suburb fill](#customer-suburb-fill), `FILL_CUSTOMER_SUBURB`). Each part is a no-op until its setting is `true` |
 | `newArrivals` | timer, 18:15 UTC (04:15 AEST) | keeps the New Arrivals collection to products created in Unleashed in the last six months ([New Arrivals](#new-arrivals), `SYNC_NEW_ARRIVALS`). No-op until the setting is `true` |
 | `imageDriftSweep` | timer, 17:00 UTC (03:00 AEST) | syncs every product whose Unleashed images differ from what Shopify received, whatever `LastModifiedOn` says ([Images Unleashed never reports](#images-unleashed-never-reports)) |
@@ -563,6 +565,73 @@ node scripts/customer-notes-cli.js --code MB712 --apply         # one customer
 node scripts/customer-notes-cli.js --restore MB712 --apply      # snapshot text back, web order or not
 node scripts/customer-notes-cli.js --export reports/notes.json  # local copy of every customer's notes
 ```
+
+### Website orders (Shopify → Unleashed)
+
+The eCommerce Hub's order import and its Customer Synchronization are one feature: on every
+website order the hub creates the sales order **and rewrites the Unleashed customer** from the
+Shopify one — blank Notes over trading terms, the Postal address with the full state name, the
+suburb in City. The hub offers no order-import-off switch short of closing the shop (which also
+stops product and stock sync), and Unleashed does not allow the customer on a sales order to be
+changed once it exists, so "import against one web customer and re-assign" is not possible either.
+This service creates the sales orders itself and never touches a customer record.
+
+What it creates is what the hub created, checked line for line against the hub's own untouched
+output on web#3234, web#3225 and web#3195 (26 Oct 2026):
+
+| Shopify | Unleashed |
+|---|---|
+| order `#3234` | `web#3234`, CustomerRef `Website Order #3234`, order note in Comments, Shopify order id in SourceId |
+| chain (Unleashed unit of measure **Weight**), quantity 2 | **two lines**, OrderQuantity = grams (the variant weight), UnitPrice = Unleashed's per-gram price when it explains the website price, else website price ÷ grams — so each piece is weighed and corrected on its own line |
+| anything sold each, quantity 5 | one line, OrderQuantity 5 |
+| AIOD tier discount, a discount code | the line's DiscountRate (a whole percentage when it reproduces the cents) |
+| shipping | a `FREIGHT` line at the shipping price, title in Comments |
+| delivery address | DeliveryName `Company - Person`, Suburb = Shopify suburb, Region = the abbreviation (`VIC`), City empty — the office's own style |
+| status | `ORDER_SYNC_STATUS`, `Placed` like the hub; warehouse `WH`; tax `G.S.T.`; the customer's sales group and salesperson |
+
+**The customer is chosen, never created or edited.** In order:
+
+1. the Shopify customer's **Unleashed customer code** field (`custom.unleashed_customer_code`,
+   editable on the customer page in Shopify admin once `--ensure-definition --apply` has run);
+2. the one active Unleashed customer whose `Email` is the order's email;
+3. the one active Unleashed customer with a contact carrying that email.
+
+Two customers with the same email (24 emails are shared, mostly `lucy@`/`info@`/`ron@searay`
+placeholders), or none, means the order is **held, not guessed**: nothing is created, the office is
+emailed once with the Shopify email and company, and the order is retried every five minutes until
+the office fills in the code on the Shopify customer, adds the email to the Unleashed customer, or
+names the code on the CLI. A SKU missing from Unleashed holds the order the same way. Cancelled
+and test orders are skipped. Before every create the number `web#NNNN` is looked up in Unleashed,
+so a webhook retry, a timer overlap or a lost state file cannot make a second order.
+
+`--seed-mapping` fills the code field from history: every web order the hub created ties a
+Shopify order number to an Unleashed customer, and the Shopify order ties it to a customer id;
+the most recent order's customer wins, and a customer already carrying a different code is listed
+and left alone. The hub kept its own link table — PP852's Unleashed email is `office@` while its
+orders arrive from `craigieburn@` — which is why email alone is not enough and the seed matters.
+
+```bash
+node scripts/order-sync-self-test.js                                 # the line rules, no network
+node scripts/order-sync-cli.js --compare 3234                        # our plan next to the hub's web#3234, line by line
+node scripts/order-sync-cli.js --order 3236                          # what would be created for #3236
+node scripts/order-sync-cli.js --order 3236 --customer KJ599 --apply # create it, naming the customer
+node scripts/order-sync-cli.js --since 48h                           # one timer pass, dry run
+node scripts/order-sync-cli.js --ensure-definition --apply           # show the code field on Shopify customer pages
+node scripts/order-sync-cli.js --seed-mapping --csv reports/customer-mapping.csv   # preview; add --apply to write
+node scripts/order-sync-cli.js --map 5141779349657 PP852 --apply    # one customer by hand
+node scripts/register-shopify-order-webhook.js https://searay-unleashed-sync.azurewebsites.net/api/shopify/order-webhook
+```
+
+The Shopify custom app (**UnlShopSync**) needs `read_orders`, `read_customers`, `write_customers`
+(the code field) and, for seeding from orders older than 60 days, `read_all_orders`. Deliveries
+are signed with that app's API secret key: `SHOPIFY_WEBHOOK_SECRET`.
+
+**Cutover.** With the sync deployed and `DRY_RUN=true` for a week of shadow comparison:
+
+1. Hub → Shopify → Configuration: **Customer Synchronization off**; **Shopify Order Status =
+   Fulfilled** (fulfilment sync is off, so the hub never sees a fulfilled order and imports nothing;
+   a duplicate `web#NNNN` would be refused by Unleashed anyway). Save. Product and stock sync stay on.
+2. `SYNC_SHOPIFY_ORDERS=true`, `DRY_RUN=false`. The notes guard keeps running as a backstop.
 
 ### Why the daily report exists
 
@@ -731,6 +800,15 @@ Deliveries older than 5 minutes are rejected.
 | `WEEKLY_SPECIALS_WAREHOUSE` | `WH` | the warehouse the stock must be in, and whose bin locations relate products |
 | `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` | `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, D.N. Jewels, DAUB A.D` | Unleashed supplier names Searay still buys from; their stock is never a special. Setting it replaces the list |
 | `WEEKLY_SPECIALS_COLLECTION_HANDLE` | `sale` | the collection the timer orders |
+| `SYNC_SHOPIFY_ORDERS` | `false` | let the 5-minute timer and the order webhook create website orders in Unleashed. Off so a deploy never starts creating sales orders by itself; the CLI's `--apply` ignores it |
+| `SHOPIFY_WEBHOOK_SECRET` | — | the custom app's API secret key; `orders/create` deliveries are rejected without it |
+| `ORDER_SYNC_PREFIX` | `web` | order number prefix, `web#3234` |
+| `ORDER_SYNC_STATUS` | `Placed` | status the sales order is created with (`Parked` does not allocate stock) |
+| `ORDER_SYNC_WAREHOUSE` | `WH` | warehouse on the sales order |
+| `ORDER_SYNC_FREIGHT_CODE` | `FREIGHT` | product for the shipping line |
+| `ORDER_SYNC_TAX_CODE` / `ORDER_SYNC_TAX_RATE` | `G.S.T.` / `0.1` | tax on the order |
+| `ORDER_SYNC_LOOKBACK_HOURS` | `48` | how far back the timer looks for website orders not yet in Unleashed |
+| `ORDER_SYNC_STORAGE_CONNECTION` | `AzureWebJobsStorage` | where `order-sync/state.json` (what was done per order, who was emailed) lives |
 
 ## Suggested rollout
 

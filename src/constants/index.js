@@ -812,3 +812,103 @@ export const RESTORE_OUTCOME = {
   FAILED: 'failed',
   NOT_IN_EXPORT: 'not_in_export',
 };
+
+/* ------------------------------------------------------------------------- */
+/* Shopify → Unleashed order sync                                            */
+/* ------------------------------------------------------------------------- */
+
+/** Prepended to the Shopify order name, matching the hub's `web#3234` numbering. */
+export const DEFAULT_ORDER_SYNC_PREFIX = 'web';
+/** The hub's "Unleashed Order Status" was Placed; Placed allocates stock, Parked does not. */
+export const DEFAULT_ORDER_SYNC_STATUS = 'Placed';
+export const DEFAULT_ORDER_SYNC_WAREHOUSE = 'WH';
+export const DEFAULT_ORDER_SYNC_FREIGHT_CODE = 'FREIGHT';
+export const DEFAULT_ORDER_SYNC_TAX_CODE = 'G.S.T.';
+export const DEFAULT_ORDER_SYNC_TAX_RATE = 0.1;
+export const DEFAULT_ORDER_SYNC_CURRENCY = 'AUD';
+/** How far back the timer looks for website orders not yet in Unleashed. */
+export const DEFAULT_ORDER_SYNC_LOOKBACK_HOURS = 48;
+export const DEFAULT_ORDER_SYNC_TIMEZONE = 'Australia/Melbourne';
+export const ORDER_SYNC_MAX_PAGES = 20;
+export const ORDER_SYNC_PAGE_SIZE = 50;
+
+/** Unleashed unit-of-measure names. Weight products are sold by the gram. */
+export const UNLEASHED_UOM = {
+  WEIGHT: 'Weight',
+  EACH: 'Each',
+};
+
+/**
+ * The office's own say on which Unleashed customer a Shopify customer is. Set
+ * on the customer in Shopify admin; read before any email match.
+ */
+export const CUSTOMER_CODE_METAFIELD = {
+  NAMESPACE: 'custom',
+  KEY: 'unleashed_customer_code',
+  TYPE: 'single_line_text_field',
+  NAME: 'Unleashed customer code',
+};
+
+export const SHOPIFY_WEBHOOK_HEADER = {
+  HMAC: 'x-shopify-hmac-sha256',
+  TOPIC: 'x-shopify-topic',
+  SHOP_DOMAIN: 'x-shopify-shop-domain',
+};
+export const SHOPIFY_ORDER_WEBHOOK_TOPIC = 'ORDERS_CREATE';
+
+export const ORDER_SYNC_OUTCOME = {
+  /** Sales order created in Unleashed. */
+  CREATED: 'created',
+  /** An order with this number was already in Unleashed; nothing written. */
+  EXISTS: 'exists',
+  /** Would have been created, but writes are off. */
+  PLANNED: 'planned',
+  /** No Unleashed customer carries this email and no mapping is set. */
+  UNMATCHED: 'unmatched',
+  /** More than one Unleashed customer carries this email. */
+  AMBIGUOUS: 'ambiguous',
+  /** A SKU on the order is not an Unleashed product. */
+  UNKNOWN_SKU: 'unknown-sku',
+  /** Cancelled or test order; never imported. */
+  SKIPPED: 'skipped',
+  /** Unleashed rejected the order or a request failed. */
+  FAILED: 'failed',
+};
+
+/** Outcomes that are final: the timer does not look at the order again. */
+export const ORDER_SYNC_DONE_OUTCOMES = [
+  ORDER_SYNC_OUTCOME.CREATED,
+  ORDER_SYNC_OUTCOME.EXISTS,
+  ORDER_SYNC_OUTCOME.SKIPPED,
+];
+
+/** Outcomes the office is told about, once per order. */
+export const ORDER_SYNC_PROBLEM_OUTCOMES = [
+  ORDER_SYNC_OUTCOME.UNMATCHED,
+  ORDER_SYNC_OUTCOME.AMBIGUOUS,
+  ORDER_SYNC_OUTCOME.UNKNOWN_SKU,
+  ORDER_SYNC_OUTCOME.FAILED,
+];
+
+/** How the Unleashed customer was chosen. */
+export const CUSTOMER_MATCH = {
+  METAFIELD: 'metafield',
+  EMAIL: 'email',
+  CONTACT_EMAIL: 'contact-email',
+  EXPLICIT: 'explicit',
+};
+
+export const ORDER_SYNC_WARNING = {
+  NAME_MISMATCH: 'name-mismatch',
+  TOTAL_MISMATCH: 'total-mismatch',
+  NO_WEIGHT: 'no-weight',
+  MAPPED_CODE_MISSING: 'mapped-code-missing',
+  TAX_INCLUSIVE: 'tax-inclusive',
+};
+
+export const ORDER_SYNC_CONTAINER = 'order-sync';
+export const ORDER_SYNC_STATE_BLOB = 'state.json';
+export const ORDER_SYNC_STATE_VERSION = 1;
+
+/** Cents of rounding tolerated per line before the total is reported as off. */
+export const ORDER_SYNC_TOTAL_TOLERANCE_PER_LINE = 0.02;

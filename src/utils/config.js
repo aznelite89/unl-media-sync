@@ -7,6 +7,15 @@ import {
   DEFAULT_MAX_SYNCED_IMAGES,
   DEFAULT_MISSING_IMAGE_EXCLUDE_CODES,
   DEFAULT_MISSING_IMAGE_MONTHS,
+  DEFAULT_ORDER_SYNC_CURRENCY,
+  DEFAULT_ORDER_SYNC_FREIGHT_CODE,
+  DEFAULT_ORDER_SYNC_LOOKBACK_HOURS,
+  DEFAULT_ORDER_SYNC_PREFIX,
+  DEFAULT_ORDER_SYNC_STATUS,
+  DEFAULT_ORDER_SYNC_TAX_CODE,
+  DEFAULT_ORDER_SYNC_TAX_RATE,
+  DEFAULT_ORDER_SYNC_TIMEZONE,
+  DEFAULT_ORDER_SYNC_WAREHOUSE,
   DEFAULT_NEW_ARRIVAL_COLLECTION_HANDLE,
   DEFAULT_NEW_ARRIVAL_MONTHS,
   DEFAULT_WEEKLY_SPECIALS_COLLECTION_HANDLE,
@@ -48,7 +57,7 @@ function readList(value, fallback) {
  * misconfigured deployment fails loudly on first invocation instead of silently
  * no-oping.
  *
- * @param {{ requireWebhookKey?: boolean }} [options]
+ * @param {{ requireWebhookKey?: boolean, requireShopifyWebhookSecret?: boolean }} [options]
  */
 export function loadConfig(options = {}) {
   const config = {
@@ -60,6 +69,8 @@ export function loadConfig(options = {}) {
     shopify: {
       storeDomain: process.env.SHOPIFY_STORE_DOMAIN,
       adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
+      /** The custom app's API secret key; Shopify signs webhook deliveries with it. */
+      webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET,
     },
     maxSyncedImages: readInt(process.env.MAX_SYNCED_IMAGES, DEFAULT_MAX_SYNCED_IMAGES),
     /** Total images allowed on one Shopify product page, counting existing media. */
@@ -160,6 +171,27 @@ export function loadConfig(options = {}) {
       process.env.MISSING_IMAGE_EXCLUDE_CODES,
       DEFAULT_MISSING_IMAGE_EXCLUDE_CODES,
     ),
+    /**
+     * Off by default so a deploy never starts creating sales orders by itself.
+     * When on, the timer and the Shopify webhook create website orders in
+     * Unleashed, choosing (never creating or editing) the customer. The CLI's
+     * `--apply` ignores it. DRY_RUN still overrides.
+     */
+    syncShopifyOrders: readBool(process.env.SYNC_SHOPIFY_ORDERS, false),
+    orderSync: {
+      prefix: process.env.ORDER_SYNC_PREFIX || DEFAULT_ORDER_SYNC_PREFIX,
+      status: process.env.ORDER_SYNC_STATUS || DEFAULT_ORDER_SYNC_STATUS,
+      warehouseCode: process.env.ORDER_SYNC_WAREHOUSE || DEFAULT_ORDER_SYNC_WAREHOUSE,
+      freightCode: process.env.ORDER_SYNC_FREIGHT_CODE || DEFAULT_ORDER_SYNC_FREIGHT_CODE,
+      taxCode: process.env.ORDER_SYNC_TAX_CODE || DEFAULT_ORDER_SYNC_TAX_CODE,
+      taxRate: Number(process.env.ORDER_SYNC_TAX_RATE) || DEFAULT_ORDER_SYNC_TAX_RATE,
+      currencyCode: process.env.ORDER_SYNC_CURRENCY || DEFAULT_ORDER_SYNC_CURRENCY,
+      timeZone: process.env.ORDER_SYNC_TIMEZONE || DEFAULT_ORDER_SYNC_TIMEZONE,
+      lookbackHours: readInt(process.env.ORDER_SYNC_LOOKBACK_HOURS, DEFAULT_ORDER_SYNC_LOOKBACK_HOURS),
+    },
+    /** Where the order sync state lives; the Function App's own storage unless set. */
+    orderSyncStorageConnection:
+      process.env.ORDER_SYNC_STORAGE_CONNECTION || process.env.AzureWebJobsStorage || '',
     dryRun: readBool(process.env.DRY_RUN, false),
   };
 
@@ -170,6 +202,9 @@ export function loadConfig(options = {}) {
   if (!config.shopify.adminToken) missing.push('SHOPIFY_ADMIN_TOKEN');
   if (options.requireWebhookKey && !config.unleashed.webhookSignatureKey) {
     missing.push('UNLEASHED_WEBHOOK_SIGNATURE_KEY');
+  }
+  if (options.requireShopifyWebhookSecret && !config.shopify.webhookSecret) {
+    missing.push('SHOPIFY_WEBHOOK_SECRET');
   }
   if (missing.length) {
     throw new Error(`Missing required app settings: ${missing.join(', ')}`);

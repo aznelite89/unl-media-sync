@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-26
+
+### Added
+- Shopify → Unleashed order sync (`orderSync` timer every 5 min + `shopifyOrderWebhook` on `orders/create`), gated by `SYNC_SHOPIFY_ORDERS`: creates `web#NNNN` sales orders, chain as one line per piece in grams, per-piece as one line with quantity, AIOD discount as the line rate, a FREIGHT line; the customer is chosen (mapping metafield, then unique email) and never created or edited; an unidentified customer holds the order and emails the office once.
+- `custom.unleashed_customer_code` customer metafield as the office's mapping; `order-sync-cli.js --seed-mapping` fills it from past web orders.
+- `scripts/order-sync-cli.js` (`--order`, `--compare`, `--since`, `--customer`, `--map`, `--seed-mapping`, `--ensure-definition`, `--state`), `scripts/register-shopify-order-webhook.js`, `scripts/order-sync-self-test.js`.
+
+### Fixed
+- Unleashed GET requests sign the decoded query string, so filters with `#` or `@` (order numbers, emails) no longer 403.
+
 ## 2026-10-16
 
 ### Added

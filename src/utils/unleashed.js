@@ -100,7 +100,11 @@ export function createUnleashedClient(config, log = console) {
    * @param {Record<string, string | number | undefined>} [params]
    */
   async function get(path, params = {}) {
-    // Sign exactly what goes on the wire — encoding must not diverge.
+    // Unleashed checks the signature against the DECODED query string: a
+    // value sent as `web%233234` must be signed as `web#3234`, and `%40`
+    // signed as `%40` is a bare 403 (probed 26 Oct 2026). Nothing the sync
+    // sent before contained a character that encodes, so this is a no-op for
+    // every existing call.
     const queryString = buildQueryString(params);
     const url = `${UNLEASHED_API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
 
@@ -112,7 +116,7 @@ export function createUnleashedClient(config, log = console) {
             Accept: 'application/json',
             'Content-Type': 'application/json',
             [UNLEASHED_HEADER.AUTH_ID]: apiId,
-            [UNLEASHED_HEADER.SIGNATURE]: signQueryString(queryString, apiKey),
+            [UNLEASHED_HEADER.SIGNATURE]: signQueryString(decodeURIComponent(queryString), apiKey),
             [UNLEASHED_HEADER.CLIENT_TYPE]: CLIENT_TYPE,
           },
         }),
@@ -416,6 +420,56 @@ export function createUnleashedClient(config, log = console) {
     return listAll('Products', { includeObsolete: 'false' });
   }
 
+  /**
+   * Active or obsolete customers carrying `email`, on the record's own Email
+   * or on a contact. Unleashed's `contactEmail` filter covers both; the
+   * caller decides which match it trusts.
+   *
+   * @param {string} email
+   */
+  async function findCustomersByEmail(email) {
+    const page = await get(`/Customers/${UNLEASHED_FIRST_PAGE}`, {
+      contactEmail: email,
+      pageSize: CUSTOMER_PAGE_SIZE,
+    });
+    return page?.Items ?? [];
+  }
+
+  /**
+   * One customer by exact code. The `customerCode` filter is a prefix match,
+   * so `AC05` would also return AC057 and AC058; the code is compared here.
+   *
+   * @param {string} customerCode
+   */
+  async function getCustomerByCode(customerCode) {
+    const wanted = String(customerCode).trim().toLowerCase();
+    const page = await get(`/Customers/${UNLEASHED_FIRST_PAGE}`, {
+      customerCode,
+      pageSize: CUSTOMER_PAGE_SIZE,
+    });
+    return (page?.Items ?? []).find((c) => String(c?.CustomerCode ?? '').trim().toLowerCase() === wanted) ?? null;
+  }
+
+  /**
+   * The sales order numbered exactly `orderNumber` (`web#3234`), or null.
+   * This is the duplicate check before every create.
+   *
+   * @param {string} orderNumber
+   */
+  async function findSalesOrderByNumber(orderNumber) {
+    const wanted = String(orderNumber).trim().toLowerCase();
+    const page = await get(`/SalesOrders/${UNLEASHED_FIRST_PAGE}`, { orderNumber, pageSize: 10 });
+    return (page?.Items ?? []).find((o) => String(o?.OrderNumber ?? '').trim().toLowerCase() === wanted) ?? null;
+  }
+
+  /**
+   * Creates a sales order. Unleashed returns the saved order, Guid included.
+   * @param {object} body A POST /SalesOrders body.
+   */
+  async function createSalesOrder(body) {
+    return post('/SalesOrders', body);
+  }
+
   return {
     get,
     post,
@@ -423,6 +477,10 @@ export function createUnleashedClient(config, log = console) {
     iterateCustomers,
     updateCustomer,
     listShopifyOrdersForCustomer,
+    findCustomersByEmail,
+    getCustomerByCode,
+    findSalesOrderByNumber,
+    createSalesOrder,
     getProductByGuid,
     getProductByCode,
     iterateProducts,

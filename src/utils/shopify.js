@@ -12,6 +12,10 @@ import {
   SHOPIFY_THROTTLED_CODE,
   SHOPIFY_TOKEN_HEADER,
   STATE_METAFIELD,
+  CUSTOMER_CODE_METAFIELD,
+  ORDER_SYNC_MAX_PAGES,
+  ORDER_SYNC_PAGE_SIZE,
+  SHOPIFY_ORDER_WEBHOOK_TOPIC,
 } from '../constants/index.js';
 import { fetchWithRetry, sleep } from './http.js';
 
@@ -326,6 +330,63 @@ const REORDER_COLLECTION = /* GraphQL */ `
  * @param {{ shopify: { storeDomain: string, adminToken: string } }} config
  * @param {{ info?: Function, warn?: Function, error?: Function }} [log]
  */
+
+/**
+ * Everything the order sync reads from an order. Kept in one place so the
+ * normaliser in orderSyncPlan.js and this selection cannot drift apart.
+ */
+export const ORDER_FIELDS = `
+  id name createdAt cancelledAt test note taxesIncluded currencyCode email
+  customer {
+    id email firstName lastName
+    defaultAddress { company }
+    metafield(namespace: "${CUSTOMER_CODE_METAFIELD.NAMESPACE}", key: "${CUSTOMER_CODE_METAFIELD.KEY}") { value }
+  }
+  shippingAddress { company name address1 address2 city provinceCode zip country phone }
+  shippingLines(first: 5) { nodes { title discountedPriceSet { shopMoney { amount } } } }
+  lineItems(first: 100) {
+    nodes {
+      id sku title quantity
+      originalUnitPriceSet { shopMoney { amount } }
+      originalTotalSet { shopMoney { amount } }
+      discountAllocations { allocatedAmountSet { shopMoney { amount } } }
+      variant { inventoryItem { measurement { weight { value unit } } } }
+    }
+  }
+  subtotalPriceSet { shopMoney { amount } }
+  totalTaxSet { shopMoney { amount } }
+  totalPriceSet { shopMoney { amount } }
+`;
+
+const GET_ORDER = `query GetOrder($id: ID!) { order(id: $id) { ${ORDER_FIELDS} } }`;
+
+const LIST_ORDERS = `query ListOrders($first: Int!, $after: String, $query: String!) {
+  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
+    nodes { ${ORDER_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+const SET_CUSTOMER_METAFIELD = `mutation SetCustomerCode($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) { metafields { id value } userErrors { field message } }
+}`;
+
+const ENSURE_METAFIELD_DEFINITION = `mutation EnsureDefinition($definition: MetafieldDefinitionInput!) {
+  metafieldDefinitionCreate(definition: $definition) {
+    createdDefinition { id }
+    userErrors { field message code }
+  }
+}`;
+
+const LIST_WEBHOOKS = `{ webhookSubscriptions(first: 50) { nodes { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } } }`;
+
+const CREATE_WEBHOOK = `mutation CreateWebhook($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+    webhookSubscription { id }
+    userErrors { field message }
+  }
+}`;
+
 export function createShopifyClient(config, log = console) {
   const { storeDomain, adminToken } = config.shopify;
   const endpoint = `https://${storeDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
@@ -768,8 +829,104 @@ export function createShopifyClient(config, log = console) {
     return jobs;
   }
 
+  /** One order, in the shape `normaliseOrder` expects, or null. */
+  async function getOrder(orderId) {
+    const data = await graphql(GET_ORDER, { id: orderId }, { label: 'getOrder' });
+    return data?.order ?? null;
+  }
+
+  /**
+   * Orders created at or after `sinceIso`, oldest first.
+   * @param {string} sinceIso
+   * @param {{ maxPages?: number }} [options]
+   */
+  async function listOrdersCreatedSince(sinceIso, { maxPages = ORDER_SYNC_MAX_PAGES } = {}) {
+    const orders = [];
+    let after = null;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await graphql(
+        LIST_ORDERS,
+        { first: ORDER_SYNC_PAGE_SIZE, after, query: `created_at:>='${sinceIso}'` },
+        { label: 'listOrders' },
+      );
+      orders.push(...(data?.orders?.nodes ?? []));
+      if (!data?.orders?.pageInfo?.hasNextPage) return orders;
+      after = data.orders.pageInfo.endCursor;
+    }
+    throw new Error(`more than ${maxPages} pages of orders since ${sinceIso}; narrow the window`);
+  }
+
+  /** Records the office's Unleashed code on a Shopify customer. */
+  async function setCustomerUnleashedCode(customerId, customerCode) {
+    const data = await graphql(
+      SET_CUSTOMER_METAFIELD,
+      {
+        metafields: [
+          {
+            ownerId: customerId,
+            namespace: CUSTOMER_CODE_METAFIELD.NAMESPACE,
+            key: CUSTOMER_CODE_METAFIELD.KEY,
+            type: CUSTOMER_CODE_METAFIELD.TYPE,
+            value: customerCode,
+          },
+        ],
+      },
+      { label: 'setCustomerUnleashedCode' },
+    );
+    assertNoUserErrors('setCustomerUnleashedCode', data?.metafieldsSet?.userErrors);
+    return data?.metafieldsSet?.metafields?.[0] ?? null;
+  }
+
+  /**
+   * Makes the code show as an editable field on the customer page in Shopify
+   * admin. Safe to call again: "already exists" is not an error.
+   */
+  async function ensureCustomerCodeDefinition() {
+    const data = await graphql(
+      ENSURE_METAFIELD_DEFINITION,
+      {
+        definition: {
+          name: CUSTOMER_CODE_METAFIELD.NAME,
+          namespace: CUSTOMER_CODE_METAFIELD.NAMESPACE,
+          key: CUSTOMER_CODE_METAFIELD.KEY,
+          type: CUSTOMER_CODE_METAFIELD.TYPE,
+          ownerType: 'CUSTOMER',
+          description: 'Which Unleashed customer this Shopify customer is. Website orders are created against it.',
+          pin: true,
+        },
+      },
+      { label: 'ensureCustomerCodeDefinition' },
+    );
+    const errors = data?.metafieldDefinitionCreate?.userErrors ?? [];
+    const alreadyThere = errors.every((error) => error.code === 'TAKEN');
+    if (errors.length && !alreadyThere) assertNoUserErrors('ensureCustomerCodeDefinition', errors);
+    return { created: Boolean(data?.metafieldDefinitionCreate?.createdDefinition), alreadyThere: errors.length > 0 };
+  }
+
+  async function listWebhooks() {
+    const data = await graphql(LIST_WEBHOOKS, {}, { label: 'listWebhooks' });
+    return data?.webhookSubscriptions?.nodes ?? [];
+  }
+
+  /** Subscribes `callbackUrl` to new orders. */
+  async function createOrderWebhook(callbackUrl) {
+    const data = await graphql(
+      CREATE_WEBHOOK,
+      { topic: SHOPIFY_ORDER_WEBHOOK_TOPIC, webhookSubscription: { callbackUrl, format: 'JSON' } },
+      { label: 'createOrderWebhook' },
+    );
+    assertNoUserErrors('createOrderWebhook', data?.webhookSubscriptionCreate?.userErrors);
+    return data?.webhookSubscriptionCreate?.webhookSubscription ?? null;
+  }
+
   return {
     graphql,
+    getOrder,
+    listOrdersCreatedSince,
+    setCustomerUnleashedCode,
+    ensureCustomerCodeDefinition,
+    listWebhooks,
+    createOrderWebhook,
     findProductsBySku,
     listAllVariantSkus,
     iterateProductsWithMedia,

@@ -10,6 +10,7 @@
 
     "SHOPIFY_STORE_DOMAIN": "for-discovery.myshopify.com",
     "SHOPIFY_ADMIN_TOKEN": "<custom app Admin API access token, shpat_...>",
+    "SHOPIFY_WEBHOOK_SECRET": "<the same custom app's API secret key; signs orders/create deliveries>",
 
     "MAX_SYNCED_IMAGES": "5",
     "MAX_MEDIA_PER_PRODUCT": "5",
@@ -25,6 +26,16 @@
     "DAILY_LOOKBACK_HOURS": "24",
     "WEEKLY_LOOKBACK_HOURS": "168",
     "PENDING_WARN_THRESHOLD": "5",
-    "ZERO_ACTIVITY_PROBE_DAYS": "7"
+    "ZERO_ACTIVITY_PROBE_DAYS": "7",
+
+    "SYNC_SHOPIFY_ORDERS": "false",
+    "ORDER_SYNC_PREFIX": "web",
+    "ORDER_SYNC_STATUS": "Placed",
+    "ORDER_SYNC_WAREHOUSE": "WH",
+    "ORDER_SYNC_FREIGHT_CODE": "FREIGHT",
+    "ORDER_SYNC_TAX_CODE": "G.S.T.",
+    "ORDER_SYNC_TAX_RATE": "0.1",
+    "ORDER_SYNC_LOOKBACK_HOURS": "48",
+    "ORDER_SYNC_STORAGE_CONNECTION": "<optional; defaults to AzureWebJobsStorage>"
   }
 }
