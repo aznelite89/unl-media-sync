@@ -22,7 +22,7 @@ import {
   ORDER_SYNC_DONE_OUTCOMES,
   ORDER_SYNC_OUTCOME,
   ORDER_SYNC_PROBLEM_OUTCOMES,
-  SHADOW_RETRY_VERDICTS,
+  SHADOW_RETRY_OUTCOMES,
   SHADOW_VERDICT,
   SHOPIFY_ORDER_CREATOR,
 } from '../constants/index.js';
@@ -353,7 +353,7 @@ export function compareWithHub({ result, hubOrder }) {
  */
 /** A recorded shadow entry that a later pass should plan again. */
 export function shadowRetryable(entry) {
-  return entry?.outcome === ORDER_SYNC_OUTCOME.SHADOW && SHADOW_RETRY_VERDICTS.includes(entry.comparison?.verdict);
+  return entry?.outcome === ORDER_SYNC_OUTCOME.SHADOW && SHADOW_RETRY_OUTCOMES.includes(entry.plannedOutcome);
 }
 
 export async function shadowOrders({ shopify, unleashed, store, config, log, sinceIso }) {
