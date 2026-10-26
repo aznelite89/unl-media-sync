@@ -22,6 +22,7 @@ import {
   ORDER_SYNC_DONE_OUTCOMES,
   ORDER_SYNC_OUTCOME,
   ORDER_SYNC_PROBLEM_OUTCOMES,
+  SHADOW_RETRY_VERDICTS,
   SHADOW_VERDICT,
   SHOPIFY_ORDER_CREATOR,
 } from '../constants/index.js';
@@ -350,6 +351,11 @@ export function compareWithHub({ result, hubOrder }) {
  * record the verdict. Nothing is written to Unleashed. An order the hub has
  * not created yet is left for the next run.
  */
+/** A recorded shadow entry that a later pass should plan again. */
+export function shadowRetryable(entry) {
+  return entry?.outcome === ORDER_SYNC_OUTCOME.SHADOW && SHADOW_RETRY_VERDICTS.includes(entry.comparison?.verdict);
+}
+
 export async function shadowOrders({ shopify, unleashed, store, config, log, sinceIso }) {
   const since = sinceIso ?? lookbackIso(config.orderSync.lookbackHours);
   const { state, etag } = await store.load();
@@ -359,7 +365,7 @@ export async function shadowOrders({ shopify, unleashed, store, config, log, sin
 
   for (const node of nodes) {
     const previous = state.orders[node.id];
-    if (previous && ORDER_SYNC_DONE_OUTCOMES.includes(previous.outcome)) continue;
+    if (previous && ORDER_SYNC_DONE_OUTCOMES.includes(previous.outcome) && !shadowRetryable(previous)) continue;
 
     const orderNumber = `${config.orderSync.prefix}${node.name}`;
     const hubOrder = await unleashed.findSalesOrderByNumber(orderNumber);

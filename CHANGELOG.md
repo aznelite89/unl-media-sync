@@ -10,6 +10,7 @@
 - `ORDER_SYNC_SHADOW` trial mode: the timer compares each planned order with the hub's `web#NNNN` line by line and records a verdict (`same`/`edited`/`different`/`not-planned`) without writing to Unleashed or emailing; CLI `--shadow` and `--shadow-report`.
 
 ### Fixed
+- Shadow passes plan a not-planned order again on later runs instead of keeping the first verdict forever
 - `--seed-mapping` read zero hub orders (it called a client method that was never exported, behind optional chaining); the client now has `listShopifyOrdersSince` and the seed fails loudly instead.
 - Shadow verdicts treat the connector's own lowercase `shopify` follow-up write as untouched, so a hub order nobody edited reads `different`, not `edited`.
 - Unleashed GET requests sign the decoded query string, so filters with `#` or `@` (order numbers, emails) no longer 403.

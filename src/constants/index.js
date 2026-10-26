@@ -889,6 +889,9 @@ export const SHADOW_VERDICT = {
   NOT_PLANNED: 'not-planned',
 };
 
+/** Shadow verdicts that are retried on later passes (a customer mapped later can resolve them). */
+export const SHADOW_RETRY_VERDICTS = [SHADOW_VERDICT.NOT_PLANNED];
+
 /** Outcomes that are final: the timer does not look at the order again. */
 export const ORDER_SYNC_DONE_OUTCOMES = [
   ORDER_SYNC_OUTCOME.CREATED,
