@@ -451,6 +451,17 @@ export function createUnleashedClient(config, log = console) {
   }
 
   /**
+   * Every sales order the Shopify connector created, ordered on or after
+   * `startDate` (YYYY-MM-DD). Throws rather than returning a short list.
+   *
+   * @param {string} startDate
+   */
+  async function listShopifyOrdersSince(startDate) {
+    const orders = await listAll('SalesOrders', { startDate });
+    return orders.filter((order) => order?.CreatedBy === SHOPIFY_ORDER_CREATOR);
+  }
+
+  /**
    * The sales order numbered exactly `orderNumber` (`web#3234`), or null.
    * This is the duplicate check before every create.
    *
@@ -479,6 +490,7 @@ export function createUnleashedClient(config, log = console) {
     listShopifyOrdersForCustomer,
     findCustomersByEmail,
     getCustomerByCode,
+    listShopifyOrdersSince,
     findSalesOrderByNumber,
     createSalesOrder,
     getProductByGuid,

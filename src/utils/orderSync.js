@@ -297,6 +297,17 @@ export function lineKey(line) {
  *
  * @param {{ result: object, hubOrder: object | null }} input
  */
+/**
+ * Whether the hub order has been touched by anyone other than the connector.
+ * The connector signs as `Shopify` on creation and sometimes `shopify` on its
+ * own immediate follow-up write, so the comparison ignores case.
+ *
+ * @param {string | null | undefined} lastModifiedBy
+ */
+export function hubOrderUntouched(lastModifiedBy) {
+  return String(lastModifiedBy ?? '').toLowerCase() === SHOPIFY_ORDER_CREATOR.toLowerCase();
+}
+
 export function compareWithHub({ result, hubOrder }) {
   if (!hubOrder) return null;
   const hub = {
@@ -312,7 +323,7 @@ export function compareWithHub({ result, hubOrder }) {
   }
   const ours = result.body.SalesOrderLines.map(lineKey);
   const customerAgrees = result.customerCode === hub.customerCode;
-  const edited = hub.lastModifiedBy !== SHOPIFY_ORDER_CREATOR;
+  const edited = !hubOrderUntouched(hub.lastModifiedBy);
 
   const remaining = [...hub.lines];
   const onlyOurs = [];

@@ -46,8 +46,8 @@ const { loadConfig } = await import('../src/utils/config.js');
 const { createUnleashedClient } = await import('../src/utils/unleashed.js');
 const { createShopifyClient } = await import('../src/utils/shopify.js');
 const { createBlobOrderStore, createMemoryOrderStore } = await import('../src/utils/orderSyncStore.js');
-const { describeResult, importOrder, lookbackIso, shadowOrders, summariseShadow, syncOrders } = await import('../src/utils/orderSync.js');
-const { ORDER_SYNC_OUTCOME, SHOPIFY_ORDER_CREATOR } = await import('../src/constants/index.js');
+const { describeResult, hubOrderUntouched, importOrder, lookbackIso, shadowOrders, summariseShadow, syncOrders } = await import('../src/utils/orderSync.js');
+const { ORDER_SYNC_OUTCOME, SEED_MAPPING_START_DATE, SHOPIFY_ORDER_CREATOR } = await import('../src/constants/index.js');
 
 function parseArgs(argv) {
   const args = { apply: false };
@@ -145,7 +145,7 @@ async function compareWithHub(result, name) {
   const theirs = hubOrder.SalesOrderLines.map((l) => `${l.Product?.ProductCode} x${l.OrderQuantity} @${l.UnitPrice} -${l.DiscountRate} =${l.LineTotal}`);
   const ours = (result.body?.SalesOrderLines ?? []).map((l) => `${l.Product.ProductCode} x${l.OrderQuantity} @${l.UnitPrice} -${l.DiscountRate} =${l.LineTotal}`);
   const width = Math.max(...ours.map((s) => s.length), 10);
-  console.log(`\n  ${'ours (planned)'.padEnd(width)}  |  hub (${hubOrder.LastModifiedBy === SHOPIFY_ORDER_CREATOR ? 'untouched' : `edited by ${hubOrder.LastModifiedBy}`})`);
+  console.log(`\n  ${'ours (planned)'.padEnd(width)}  |  hub (${hubOrderUntouched(hubOrder.LastModifiedBy) ? 'untouched' : `edited by ${hubOrder.LastModifiedBy}`})`);
   for (let i = 0; i < Math.max(ours.length, theirs.length); i += 1) {
     const same = ours[i] === theirs[i];
     console.log(`  ${(ours[i] ?? '').padEnd(width)}  ${same ? '==' : '!='}  ${theirs[i] ?? ''}`);
@@ -170,16 +170,15 @@ async function seedMapping() {
   // Every web order the hub created ties a Shopify order number to an
   // Unleashed customer; the Shopify order ties the number to a customer id.
   console.error('reading Unleashed web orders…');
-  const unleashedOrders = await unleashed.listAll?.('SalesOrders', { startDate: '2024-01-01' }) ?? [];
+  const unleashedOrders = await unleashed.listShopifyOrdersSince(SEED_MAPPING_START_DATE);
   const byName = new Map();
   for (const order of unleashedOrders) {
-    if (order.CreatedBy !== SHOPIFY_ORDER_CREATOR) continue;
     const match = /#(\d+)$/.exec(order.OrderNumber ?? '');
     if (!match) continue;
     byName.set(`#${match[1]}`, { code: order.Customer?.CustomerCode, name: order.Customer?.CustomerName, at: order.CreatedOn });
   }
   console.error(`${byName.size} web orders in Unleashed; reading Shopify orders…`);
-  const shopifyOrders = await shopify.listOrdersCreatedSince('2024-01-01T00:00:00Z', { maxPages: 100 });
+  const shopifyOrders = await shopify.listOrdersCreatedSince(`${SEED_MAPPING_START_DATE}T00:00:00Z`, { maxPages: 100 });
   const proposals = new Map();
   for (const node of shopifyOrders) {
     const hub = byName.get(node.name);

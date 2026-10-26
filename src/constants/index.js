@@ -927,3 +927,6 @@ export const ORDER_SYNC_STATE_VERSION = 1;
 
 /** Cents of rounding tolerated per line before the total is reported as off. */
 export const ORDER_SYNC_TOTAL_TOLERANCE_PER_LINE = 0.02;
+
+/** Website orders older than this never seed a customer mapping (the hub went live March 2024). */
+export const SEED_MAPPING_START_DATE = '2024-01-01';
