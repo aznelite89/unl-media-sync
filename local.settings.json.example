@@ -29,6 +29,7 @@
     "ZERO_ACTIVITY_PROBE_DAYS": "7",
 
     "SYNC_SHOPIFY_ORDERS": "false",
+    "ORDER_SYNC_SHADOW": "false",
     "ORDER_SYNC_PREFIX": "web",
     "ORDER_SYNC_STATUS": "Placed",
     "ORDER_SYNC_WAREHOUSE": "WH",

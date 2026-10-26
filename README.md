@@ -626,12 +626,21 @@ The Shopify custom app (**UnlShopSync**) needs `read_orders`, `read_customers`, 
 (the code field) and, for seeding from orders older than 60 days, `read_all_orders`. Deliveries
 are signed with that app's API secret key: `SHOPIFY_WEBHOOK_SECRET`.
 
-**Cutover.** With the sync deployed and `DRY_RUN=true` for a week of shadow comparison:
+**Shadow run.** `SYNC_SHOPIFY_ORDERS=true` with `ORDER_SYNC_SHADOW=true` runs the timer beside the
+hub for the trial week: every pass plans each new website order, looks up the `web#NNNN` the hub
+created, and records a verdict per order (`same`, `edited` when the office has already re-weighed a
+line, `different`, `not-planned` when the customer could not be chosen). Nothing is written to
+Unleashed, no email goes to the office, and the webhook only acknowledges deliveries.
+`node scripts/order-sync-cli.js --shadow-report` prints the tally; `--shadow 72h` runs one pass by
+hand. Unlike `DRY_RUN`, shadow mode leaves the image sync running.
+
+**Cutover.** Once the shadow verdicts are clean:
 
 1. Hub → Shopify → Configuration: **Customer Synchronization off**; **Shopify Order Status =
    Fulfilled** (fulfilment sync is off, so the hub never sees a fulfilled order and imports nothing;
    a duplicate `web#NNNN` would be refused by Unleashed anyway). Save. Product and stock sync stay on.
-2. `SYNC_SHOPIFY_ORDERS=true`, `DRY_RUN=false`. The notes guard keeps running as a backstop.
+2. Set `SHOPIFY_WEBHOOK_SECRET`, register the webhook, then `ORDER_SYNC_SHADOW=false`. The notes
+   guard keeps running as a backstop.
 
 ### Why the daily report exists
 
@@ -801,6 +810,7 @@ Deliveries older than 5 minutes are rejected.
 | `WEEKLY_SPECIALS_CURRENT_SUPPLIERS` | `Divya, Inah Co Ltd - 9k CZ Huggies, Forval, D.N. Jewels, DAUB A.D` | Unleashed supplier names Searay still buys from; their stock is never a special. Setting it replaces the list |
 | `WEEKLY_SPECIALS_COLLECTION_HANDLE` | `sale` | the collection the timer orders |
 | `SYNC_SHOPIFY_ORDERS` | `false` | let the 5-minute timer and the order webhook create website orders in Unleashed. Off so a deploy never starts creating sales orders by itself; the CLI's `--apply` ignores it |
+| `ORDER_SYNC_SHADOW` | `false` | with `SYNC_SHOPIFY_ORDERS=true`, compare each planned order with the hub's `web#NNNN` and record a verdict instead of creating anything; the webhook only acknowledges. Trial-week setting |
 | `SHOPIFY_WEBHOOK_SECRET` | — | the custom app's API secret key; `orders/create` deliveries are rejected without it |
 | `ORDER_SYNC_PREFIX` | `web` | order number prefix, `web#3234` |
 | `ORDER_SYNC_STATUS` | `Placed` | status the sales order is created with (`Parked` does not allocate stock) |
